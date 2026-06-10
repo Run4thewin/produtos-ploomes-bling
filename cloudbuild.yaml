@@ -1,0 +1,51 @@
+# Build + deploy no Cloud Run.
+# Disparado manualmente (gcloud builds submit) ou por trigger Git (push na branch main).
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: ploomes-bling
+  _SERVICE: ploomes-bling-sync
+  _QUEUE: ploomes-bling-products
+  _PLOOMES_GROUP_ID: "1100000674"
+  _GCS_BUCKET: ""
+  _SERVICE_URL: ""
+  _TASKS_SA: ""
+  _PLOOMES_WEBHOOK_KEY: cmc-ploomes-bling-webhook
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:latest
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --memory=512Mi
+      - --timeout=3600
+      - --set-secrets=BLING_CLIENT_ID=bling-client-id:latest,BLING_CLIENT_SECRET=bling-client-secret:latest,PLOOMES_USER_KEY=ploomes-user-key:latest,INTERNAL_SECRET=internal-secret:latest
+      - --update-env-vars=^@^USE_CLOUD_TASKS=true@GCP_PROJECT=$PROJECT_ID@CLOUD_TASKS_LOCATION=${_REGION}@CLOUD_TASKS_QUEUE=${_QUEUE}@PLOOMES_GROUP_ID=${_PLOOMES_GROUP_ID}@GCS_BUCKET=${_GCS_BUCKET}@SERVICE_URL=${_SERVICE_URL}@CLOUD_TASKS_SERVICE_ACCOUNT=${_TASKS_SA}@PLOOMES_WEBHOOK_VALIDATION_KEY=${_PLOOMES_WEBHOOK_KEY}@PLOOMES_PRODUCT_ENTITY_ID=10@BLING_TOKENS_PATH=bling/tokens.json
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
