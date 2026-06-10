@@ -31,7 +31,7 @@ Arquivos **não** versionados (`.gitignore`): `.env`, `tokens.json`, `.venv/`
 2. Conecte:
 
 ```powershell
-git remote add origin https://github.com/SUA_ORG/ploomes-bling-produtos.git
+git remote add origin https://github.com/Run4thewin/produtos-ploomes-bling.git
 git branch -M main
 git push -u origin main
 ```
@@ -78,8 +78,8 @@ Após conectar o repositório no Console (Cloud Build → Repositories):
 ```powershell
 gcloud builds triggers create github `
   --name="ploomes-bling-deploy-main" `
-  --repo-name="ploomes-bling-produtos" `
-  --repo-owner="SUA_ORG" `
+  --repo-name="produtos-ploomes-bling" `
+  --repo-owner="Run4thewin" `
   --branch-pattern="^main$" `
   --build-config="cloudbuild.yaml" `
   --substitutions="_REGION=us-central1,_REPOSITORY=ploomes-bling,_GCS_BUCKET=SEU_PROJETO-ploomes-bling-tokens,_SERVICE_URL=https://ploomes-bling-sync-xxxxx.run.app,_TASKS_SA=ploomes-bling-tasks@SEU_PROJETO.iam.gserviceaccount.com"
