@@ -230,6 +230,7 @@ async def ploomes_deal_webhook(
         )
         return {"status": "processed", "deal_id": parsed["deal_id"], "result": result}
     except RuntimeError as exc:
+        logger.exception("Erro operacional ao processar Deal %s via webhook", parsed["deal_id"])
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Erro ao processar Deal %s via webhook", parsed["deal_id"])

@@ -46,6 +46,14 @@ class DealToBlingOrderSyncService:
                 "deal_id": str(deal_id),
                 "reason": str(exc),
             }
+        except RuntimeError as exc:
+            logger.warning("Erro operacional ao processar Deal Ploomes %s: %s", deal_id, exc)
+            self._mark_deal_error(deal["Id"], str(exc))
+            return {
+                "action": "error_registered",
+                "deal_id": str(deal_id),
+                "reason": str(exc),
+            }
 
     def _create_bling_order_from_deal(self, deal: dict[str, Any]) -> dict[str, Any]:
         rule = self._find_stage_rule(deal)
