@@ -122,6 +122,7 @@ class DealToBlingOrderSyncService:
         payment_method_name = self._get_property_value(
             deal,
             self.settings.ploomes_deal_payment_method_field,
+            value_keys=("ObjectValueName", "StringValue", "IntegerValue"),
         )
         payment_method_id = self._lookup_config_map(
             self.settings.bling_payment_methods,
@@ -215,6 +216,7 @@ class DealToBlingOrderSyncService:
         freight_name = self._get_property_value(
             deal,
             self.settings.ploomes_deal_freight_type_field,
+            value_keys=("ObjectValueName", "StringValue", "IntegerValue"),
         )
         if not freight_name:
             raise DealOrderValidationError("Tipo de frete nao informado")
@@ -224,7 +226,11 @@ class DealToBlingOrderSyncService:
             raise DealOrderValidationError(f"Tipo de frete nao mapeado: {freight_name}")
 
         carrier_document = self._clean_document(
-            self._get_property_value(deal, self.settings.ploomes_deal_carrier_field)
+            self._get_property_value(
+                deal,
+                self.settings.ploomes_deal_carrier_field,
+                value_keys=("ContactValueRegister",),
+            )
         )
         carrier = self.bling.get_contact_by_document(carrier_document)
         transport: dict[str, Any] = {"fretePorConta": freight_code}
@@ -326,19 +332,25 @@ class DealToBlingOrderSyncService:
             },
         )
 
-    def _get_property_value(self, deal: dict[str, Any], field_key: str) -> Any:
+    def _get_property_value(
+        self,
+        deal: dict[str, Any],
+        field_key: str,
+        value_keys: tuple[str, ...] | None = None,
+    ) -> Any:
+        keys = value_keys or (
+            "StringValue",
+            "BigStringValue",
+            "IntegerValue",
+            "DecimalValue",
+            "ObjectValueName",
+            "ContactValueRegister",
+            "DateTimeValue",
+        )
         for item in deal.get("OtherProperties") or []:
             if item.get("FieldKey") != field_key:
                 continue
-            for value_key in (
-                "StringValue",
-                "BigStringValue",
-                "IntegerValue",
-                "DecimalValue",
-                "ObjectValueName",
-                "ContactValueRegister",
-                "DateTimeValue",
-            ):
+            for value_key in keys:
                 value = item.get(value_key)
                 if value not in (None, ""):
                     return value

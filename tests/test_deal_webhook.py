@@ -64,7 +64,7 @@ def make_settings() -> Settings:
 def make_deal(order_reference: str | None = None) -> dict:
     properties = [
         {"FieldKey": "deal_po", "StringValue": "PO-123"},
-        {"FieldKey": "deal_payment", "ObjectValueName": "BOLETO"},
+        {"FieldKey": "deal_payment", "IntegerValue": 1100230750, "ObjectValueName": "Boleto"},
         {"FieldKey": "deal_days", "StringValue": "30/60"},
         {"FieldKey": "deal_internal", "StringValue": "Obs interna"},
         {"FieldKey": "deal_external", "StringValue": "Obs externa"},
