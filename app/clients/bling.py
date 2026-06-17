@@ -142,12 +142,116 @@ class BlingClient:
     def _raise_bling_error(self, response: httpx.Response) -> None:
         if response.status_code == 403:
             body = response.json() if response.content else {}
-            if body.get("error", {}).get("type") == "insufficient_scope":
+            error_type = body.get("error", {}).get("type")
+            if error_type == "insufficient_scope":
+                scope = body.get("error", {}).get("description", "escopo insuficiente")
                 raise RuntimeError(
-                    "App Bling sem escopo 'product'. No portal developer.bling.com.br, "
-                    "adicione o escopo de Produtos ao app e rode scripts/refresh_bling_token.ps1"
+                    f"App Bling sem permissao para este recurso ({scope}). "
+                    "Adicione o escopo no developer.bling.com.br e renove o token."
                 )
         response.raise_for_status()
+
+    def search_contacts(
+        self,
+        pesquisa: str | None = None,
+        numero_documento: str | None = None,
+        pagina: int = 1,
+        limite: int = 20,
+        criterio: int | None = None,
+        telefone: str | None = None,
+        uf: str | None = None,
+        tipo_pessoa: int | None = None,
+    ) -> dict:
+        params: dict[str, str | int] = {"pagina": pagina, "limite": limite}
+        if pesquisa:
+            params["pesquisa"] = pesquisa
+        if numero_documento:
+            params["numeroDocumento"] = numero_documento
+        if criterio is not None:
+            params["criterio"] = criterio
+        if telefone:
+            params["telefone"] = telefone
+        if uf:
+            params["uf"] = uf
+        if tipo_pessoa is not None:
+            params["tipoPessoa"] = tipo_pessoa
+
+        response = httpx.get(
+            f"{self.settings.bling_api_base}/contatos",
+            headers=self._auth_headers(),
+            params=params,
+            timeout=self.settings.http_timeout_seconds,
+        )
+        self._raise_bling_error(response)
+        return response.json()
+
+    def get_contact(self, contact_id: int | str) -> dict:
+        response = httpx.get(
+            f"{self.settings.bling_api_base}/contatos/{contact_id}",
+            headers=self._auth_headers(),
+            timeout=self.settings.http_timeout_seconds,
+        )
+        self._raise_bling_error(response)
+        return response.json()["data"]
+
+    def _summarize_company_with_contacts(self, detail: dict) -> dict:
+        return {
+            "id": detail.get("id"),
+            "nome": detail.get("nome"),
+            "numeroDocumento": detail.get("numeroDocumento"),
+            "tipo": detail.get("tipo"),
+            "email": detail.get("email"),
+            "telefone": detail.get("telefone"),
+            "pessoasContato": detail.get("pessoasContato") or [],
+        }
+
+    def list_companies_with_contacts(
+        self,
+        pagina: int = 1,
+        limite: int = 20,
+        apenas_com_vinculos: bool = False,
+        max_paginas_busca: int = 10,
+    ) -> dict:
+        """Lista empresas PJ do Bling com pessoasContato agregadas do detalhe."""
+        empresas: list[dict] = []
+        pagina_atual = pagina
+        paginas_consultadas = 0
+
+        while len(empresas) < limite and paginas_consultadas < max_paginas_busca:
+            result = self.search_contacts(
+                pagina=pagina_atual,
+                limite=limite,
+                tipo_pessoa=2,
+            )
+            contacts = result.get("data", [])
+            if not contacts:
+                break
+
+            for item in contacts:
+                detail = self.get_contact(item["id"])
+                if detail.get("tipo") != "J":
+                    continue
+                pessoas = detail.get("pessoasContato") or []
+                if apenas_com_vinculos and not pessoas:
+                    continue
+                empresas.append(self._summarize_company_with_contacts(detail))
+                if len(empresas) >= limite:
+                    break
+
+            paginas_consultadas += 1
+            if len(contacts) < limite:
+                break
+            if len(empresas) >= limite:
+                break
+            pagina_atual += 1
+
+        return {
+            "pagina": pagina,
+            "limite": limite,
+            "total_retornado": len(empresas),
+            "paginas_consultadas": paginas_consultadas,
+            "empresas": empresas,
+        }
 
     def get_product_by_code(self, code: str) -> dict | None:
         response = httpx.get(

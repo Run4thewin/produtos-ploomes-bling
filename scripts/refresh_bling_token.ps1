@@ -7,12 +7,8 @@ Set-Location $Root
 Write-Host "Renovando token Bling via OAuth Selenium (projeto legado)..."
 & .\.venv\Scripts\python -c @"
 import sys
-from pathlib import Path
-legacy = Path(r'$env:LEGACY_PLOOMES_BLING_PATH')
-if not legacy.exists():
-    legacy = Path(r'C:\Users\CMC_DEV_001\Documents\projetos\cmc\automacao\ploomes_bling')
-sys.path.insert(0, str(legacy))
 import os
+from pathlib import Path
 os.chdir(r'$Root')
 sys.path.insert(0, r'$Root')
 from datetime import datetime, timedelta
@@ -21,6 +17,10 @@ from app.config import get_settings
 from get_autorization_token_bling import get_new_authorization_token_bling, refresh_access_token
 
 settings = get_settings()
+legacy = Path(settings.legacy_ploomes_bling_path)
+if not legacy.exists():
+    raise SystemExit(f'Projeto legado nao encontrado: {legacy}')
+sys.path.insert(0, str(legacy))
 store = build_token_store(settings.bling_tokens_path, settings.gcs_bucket)
 stored = store.load()
 token_info = None

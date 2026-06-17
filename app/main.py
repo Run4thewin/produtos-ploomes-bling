@@ -4,14 +4,16 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.clients.bling import BlingClient
 from app.config import get_settings
+from app.logging_config import setup_logging
 from app.services.ploomes_webhook import parse_ploomes_webhook
 from app.services.queue import ProductEventQueue
 from app.services.sync import ProductSyncService
 from app.services.sync_ploomes_to_bling import PloomesToBlingSyncService
 from app.services.webhook import verify_bling_signature
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -50,6 +52,105 @@ def _check_ploomes_validation_key(validation_key: str | None) -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/bling/contatos", tags=["Bling"])
+def search_bling_contacts(
+    pesquisa: str | None = Query(
+        default=None,
+        description="Opcional. Nome, e-mail, codigo ou termo geral. Sem filtros, lista todos paginados.",
+    ),
+    numero_documento: str | None = Query(
+        default=None,
+        description="Opcional. CPF ou CNPJ do contato.",
+    ),
+    telefone: str | None = Query(default=None, description="Opcional. Telefone do contato."),
+    uf: str | None = Query(default=None, description="Opcional. UF do contato."),
+    criterio: int | None = Query(
+        default=None,
+        description="Opcional. 1=ultimos incluidos, 2=ativos, 3=inativos, 4=excluidos, 5=todos",
+    ),
+    tipo_pessoa: int | None = Query(
+        default=None,
+        description="Opcional. 1=fisica, 2=juridica, 3=estrangeiro",
+    ),
+    pagina: int = Query(default=1, ge=1, description="Numero da pagina"),
+    limite: int = Query(default=20, ge=1, le=100, description="Registros por pagina"),
+) -> dict[str, Any]:
+    """Lista ou busca contatos cadastrados no Bling. Sem filtros, retorna a listagem geral paginada."""
+    try:
+        bling = BlingClient(get_settings())
+        result = bling.search_contacts(
+            pesquisa=pesquisa,
+            numero_documento=numero_documento,
+            telefone=telefone,
+            uf=uf,
+            criterio=criterio,
+            tipo_pessoa=tipo_pessoa,
+            pagina=pagina,
+            limite=limite,
+        )
+        contacts = result.get("data", [])
+        return {
+            "total_pagina": len(contacts),
+            "pagina": pagina,
+            "limite": limite,
+            "filtros": {
+                k: v
+                for k, v in {
+                    "pesquisa": pesquisa,
+                    "numero_documento": numero_documento,
+                    "telefone": telefone,
+                    "uf": uf,
+                    "criterio": criterio,
+                    "tipo_pessoa": tipo_pessoa,
+                }.items()
+                if v is not None
+            },
+            "contatos": contacts,
+        }
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Erro ao buscar contatos no Bling")
+        raise HTTPException(status_code=502, detail=f"Erro ao buscar contatos: {exc}") from exc
+
+
+@app.get("/bling/empresas-com-contatos", tags=["Bling"])
+def list_bling_companies_with_contacts(
+    pagina: int = Query(default=1, ge=1, description="Numero da pagina"),
+    limite: int = Query(default=20, ge=1, le=100, description="Registros por pagina"),
+    apenas_com_vinculos: bool = Query(
+        default=False,
+        description="Se true, retorna apenas empresas com pessoasContato preenchido",
+    ),
+) -> dict[str, Any]:
+    """Lista empresas PJ do Bling com pessoasContato agregadas."""
+    try:
+        bling = BlingClient(get_settings())
+        return bling.list_companies_with_contacts(
+            pagina=pagina,
+            limite=limite,
+            apenas_com_vinculos=apenas_com_vinculos,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Erro ao listar empresas com contatos no Bling")
+        raise HTTPException(status_code=502, detail=f"Erro ao listar empresas: {exc}") from exc
+
+
+@app.get("/bling/contatos/{contact_id}", tags=["Bling"])
+def get_bling_contact(contact_id: int) -> dict[str, Any]:
+    """Retorna um contato do Bling pelo ID, incluindo pessoasContato quando for empresa."""
+    try:
+        bling = BlingClient(get_settings())
+        return bling.get_contact(contact_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Erro ao buscar contato %s no Bling", contact_id)
+        raise HTTPException(status_code=502, detail=f"Erro ao buscar contato: {exc}") from exc
 
 
 @app.post("/webhooks/bling")
@@ -135,10 +236,18 @@ def process_product_task_legacy(
 @app.post("/jobs/full-sync")
 def full_sync_job(
     x_internal_secret: str | None = Header(default=None),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        description="Opcional. Limita a quantidade de produtos (ex: 5 para teste piloto).",
+    ),
 ) -> dict[str, Any]:
     _check_internal_secret(x_internal_secret)
-    stats = ProductSyncService().full_sync()
-    return {"status": "completed", "stats": stats}
+    try:
+        result = ProductSyncService().full_sync(limit=limit)
+        return {"status": "completed", **result}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/jobs/reconcile")

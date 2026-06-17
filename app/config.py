@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # Sync tuning
     reconcile_page_size: int = 100
     http_timeout_seconds: float = 30.0
+    sync_workers: int = 5
+    sync_progress_every: int = 25
+    sync_log_file: str = ""
 
     @property
     def cloud_tasks_enabled(self) -> bool:
