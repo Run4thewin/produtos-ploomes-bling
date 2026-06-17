@@ -7,8 +7,9 @@ from pydantic import BaseModel
 from app.clients.bling import BlingClient
 from app.config import get_settings
 from app.logging_config import setup_logging
-from app.services.ploomes_webhook import parse_ploomes_webhook
+from app.services.ploomes_webhook import parse_ploomes_deal_webhook, parse_ploomes_webhook
 from app.services.queue import ProductEventQueue
+from app.services.sync_deal_to_bling_order import DealToBlingOrderSyncService
 from app.services.sync import ProductSyncService
 from app.services.sync_ploomes_to_bling import PloomesToBlingSyncService
 from app.services.webhook import verify_bling_signature
@@ -203,6 +204,36 @@ async def ploomes_webhook(
 
     ProductEventQueue(settings).enqueue_ploomes(parsed["product_id"], action)
     return {"status": "accepted", "product_id": parsed["product_id"], "action": action}
+
+
+@app.post("/webhooks/ploomes/deals")
+async def ploomes_deal_webhook(
+    request: Request,
+    validation_key: str | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = get_settings()
+    _check_ploomes_validation_key(validation_key)
+
+    payload: dict[str, Any] = await request.json()
+    parsed = parse_ploomes_deal_webhook(payload, settings.ploomes_deal_entity_id)
+
+    if parsed.get("status") != "accepted":
+        logger.info("Webhook Ploomes Deal ignorado: %s", parsed)
+        return parsed
+
+    if parsed["action"] == "delete":
+        return {"status": "ignored", "reason": "delete_nao_processado"}
+
+    try:
+        result = DealToBlingOrderSyncService(settings).create_bling_order_from_deal(
+            parsed["deal_id"]
+        )
+        return {"status": "processed", "deal_id": parsed["deal_id"], "result": result}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Erro ao processar Deal %s via webhook", parsed["deal_id"])
+        raise HTTPException(status_code=502, detail=f"Erro ao processar Deal: {exc}") from exc
 
 
 @app.post("/tasks/process-bling-product")

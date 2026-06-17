@@ -194,6 +194,13 @@ class BlingClient:
         self._raise_bling_error(response)
         return response.json()["data"]
 
+    def get_contact_by_document(self, document_number: str | None) -> dict | None:
+        if not document_number:
+            return None
+        result = self.search_contacts(numero_documento=document_number, limite=1)
+        contacts = result.get("data", [])
+        return contacts[0] if contacts else None
+
     def _summarize_company_with_contacts(self, detail: dict) -> dict:
         return {
             "id": detail.get("id"),
@@ -285,6 +292,26 @@ class BlingClient:
         self._raise_bling_error(response)
         body = response.json()
         return body.get("data", body)
+
+    def create_sales_order(self, payload: dict) -> dict:
+        response = httpx.post(
+            f"{self.settings.bling_api_base}/pedidos/vendas",
+            headers=self._auth_headers(),
+            json=payload,
+            timeout=self.settings.http_timeout_seconds,
+        )
+        self._raise_bling_error(response)
+        body = response.json()
+        return body.get("data", body)
+
+    def get_sales_order(self, order_id: int | str) -> dict:
+        response = httpx.get(
+            f"{self.settings.bling_api_base}/pedidos/vendas/{order_id}",
+            headers=self._auth_headers(),
+            timeout=self.settings.http_timeout_seconds,
+        )
+        self._raise_bling_error(response)
+        return response.json()["data"]
 
     def get_product(self, product_id: int | str) -> dict:
         response = httpx.get(

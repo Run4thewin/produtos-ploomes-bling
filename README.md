@@ -5,6 +5,7 @@ Sincroniza produtos entre **Bling** e **Ploomes** em duas direções:
 ```
 Bling (webhook)  → /webhooks/bling   → cria/atualiza no Ploomes
 Ploomes (webhook)→ /webhooks/ploomes → cria no Bling se nao existir
+Ploomes (Deal)   → /webhooks/ploomes/deals → cria pedido de venda no Bling
 Cloud Scheduler  → /jobs/reconcile  → corrige divergencias Bling → Ploomes
 ```
 
@@ -14,6 +15,7 @@ Cloud Scheduler  → /jobs/reconcile  → corrige divergencias Bling → Ploomes
 |---|---|
 | `POST /webhooks/bling` | Bling → Ploomes: valida HMAC, enfileira |
 | `POST /webhooks/ploomes?validation_key=...` | Ploomes → Bling: cria produto se nao existir |
+| `POST /webhooks/ploomes/deals?validation_key=...` | Ploomes Deal → Bling: cria pedido de venda |
 | `POST /tasks/process-bling-product` | Worker Bling → Ploomes |
 | `POST /tasks/process-ploomes-product` | Worker Ploomes → Bling |
 | `POST /jobs/full-sync` | Carga inicial Bling → Ploomes |
@@ -169,9 +171,37 @@ Registrar webhook no Ploomes:
 
 Recomendacao: registrar apenas `create` para evitar loop de atualizacoes entre os dois sistemas.
 
+## Ploomes Deal → Pedido Bling (webhook)
+
+Quando um Deal chega a um stage configurado, o servico processa apenas esse Deal, busca a ultima Quote, cria um pedido de venda no Bling e move o Deal para o stage de destino.
+
+Endpoint:
+
+```text
+https://produtos-ploomes-bling-539366668006.us-central1.run.app/webhooks/ploomes/deals?validation_key=cmc-ploomes-bling-webhook
+```
+
+Registrar webhook no Ploomes:
+
+```powershell
+.\.venv\Scripts\python scripts\register_ploomes_deal_webhook.py `
+  --callback-url "https://produtos-ploomes-bling-539366668006.us-central1.run.app/webhooks/ploomes/deals?validation_key=cmc-ploomes-bling-webhook" `
+  --validation-key "cmc-ploomes-bling-webhook" `
+  --actions update
+```
+
+O fluxo usa `PLOOMES_DEAL_STAGE_RULES` no formato `pipeline:stage_origem:stage_destino`. Por padrao, foram migradas as regras do robo legado:
+
+```text
+110005492:110022662:110022663,110001615:110020807:110008939
+```
+
+Para evitar duplicidade, o servico verifica o campo `PLOOMES_DEAL_ORDER_FIELD` antes de criar o pedido. Se ja houver uma referencia de pedido Bling, o webhook retorna `already_processed`.
+
 ## Pontos de atenção
 
 - **Cloud Tasks** é obrigatório em produção: o webhook responde em <5s e o processamento ocorre de forma assíncrona.
+- **Deal → Pedido Bling** processa direto no webhook, sem Cloud Tasks, conforme decisao de manter esse fluxo mais simples.
 - **Tokens Bling** são persistidos no GCS; a cada refresh o arquivo é atualizado automaticamente.
 - **Exclusão no Bling** inativa o produto no Ploomes (`Suspended=true`), não apaga.
 - Amplie `app/services/mapping.py` e `diff_fields` conforme novos campos forem necessários.
