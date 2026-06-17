@@ -1,4 +1,5 @@
 import logging
+import time
 from urllib.parse import quote
 
 import httpx
@@ -6,6 +7,8 @@ import httpx
 from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+PLOOMES_TRANSIENT_STATUS = {502, 503, 504}
 
 
 class PloomesClient:
@@ -27,62 +30,97 @@ class PloomesClient:
             )
         response.raise_for_status()
 
+    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        timeout = min(float(self.settings.http_timeout_seconds), 10.0)
+        last_error: Exception | None = None
+
+        for attempt in range(1, 4):
+            try:
+                response = httpx.request(
+                    method,
+                    f"{self.settings.ploomes_api_base}/{path.lstrip('/')}",
+                    headers=self._headers(),
+                    timeout=timeout,
+                    **kwargs,
+                )
+                if response.status_code not in PLOOMES_TRANSIENT_STATUS:
+                    return response
+
+                last_error = RuntimeError(
+                    f"Ploomes retornou HTTP {response.status_code}: {response.text[:300]}"
+                )
+                logger.warning(
+                    "Ploomes instavel (%s %s) tentativa %s/3: HTTP %s",
+                    method,
+                    path,
+                    attempt,
+                    response.status_code,
+                )
+            except httpx.TimeoutException as exc:
+                last_error = exc
+                logger.warning(
+                    "Timeout no Ploomes (%s %s) tentativa %s/3",
+                    method,
+                    path,
+                    attempt,
+                )
+
+            if attempt < 3:
+                time.sleep(0.5 * attempt)
+
+        raise RuntimeError(f"Ploomes indisponivel apos 3 tentativas: {last_error}")
+
     def get_product_by_id(self, product_id: int | str) -> dict:
-        response = httpx.get(
-            f"{self.settings.ploomes_api_base}/Products({product_id})",
-            headers=self._headers(),
+        response = self._request(
+            "GET",
+            f"Products({product_id})",
             params={"$expand": "OtherProperties"},
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_ploomes_error(response)
         return response.json()
 
     def get_product_by_code(self, code: str) -> dict | None:
         safe_code = code.replace("'", "''")
-        response = httpx.get(
-            f"{self.settings.ploomes_api_base}/Products",
-            headers=self._headers(),
+        response = self._request(
+            "GET",
+            "Products",
             params={
                 "$filter": f"Code eq '{safe_code}'",
                 "$top": 1,
                 "$expand": "OtherProperties",
             },
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_ploomes_error(response)
         values = response.json().get("value", [])
         return values[0] if values else None
 
     def create_product(self, payload: dict) -> dict:
-        response = httpx.post(
-            f"{self.settings.ploomes_api_base}/Products",
-            headers=self._headers(),
+        response = self._request(
+            "POST",
+            "Products",
             json=payload,
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_ploomes_error(response)
         return response.json()
 
     def update_product(self, product_id: int, payload: dict) -> dict:
-        response = httpx.patch(
-            f"{self.settings.ploomes_api_base}/Products({product_id})",
-            headers=self._headers(),
+        response = self._request(
+            "PATCH",
+            f"Products({product_id})",
             json=payload,
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_ploomes_error(response)
         return response.json()
 
     def get_deal_by_id(self, deal_id: int | str) -> dict:
-        response = httpx.get(
-            f"{self.settings.ploomes_api_base}/Deals",
-            headers=self._headers(),
+        response = self._request(
+            "GET",
+            "Deals",
             params={
                 "$filter": f"Id eq {deal_id}",
                 "$top": 1,
                 "$expand": "OtherProperties,Contact",
             },
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_ploomes_error(response)
         values = response.json().get("value", [])
@@ -91,27 +129,25 @@ class PloomesClient:
         return values[0]
 
     def get_latest_quote_by_deal(self, deal_id: int | str) -> dict | None:
-        response = httpx.get(
-            f"{self.settings.ploomes_api_base}/Quotes",
-            headers=self._headers(),
+        response = self._request(
+            "GET",
+            "Quotes",
             params={
                 "$filter": f"DealId eq {deal_id}",
                 "$top": 1,
                 "$expand": "Products,Pages,OtherProperties",
                 "$orderby": "Id desc",
             },
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_ploomes_error(response)
         values = response.json().get("value", [])
         return values[0] if values else None
 
     def update_deal(self, deal_id: int | str, payload: dict) -> dict:
-        response = httpx.patch(
-            f"{self.settings.ploomes_api_base}/Deals({deal_id})",
-            headers=self._headers(),
+        response = self._request(
+            "PATCH",
+            f"Deals({deal_id})",
             json=payload,
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_ploomes_error(response)
         body = response.json() if response.content else {}
@@ -120,16 +156,15 @@ class PloomesClient:
     def iter_products(self, page_size: int = 100):
         skip = 0
         while True:
-            response = httpx.get(
-                f"{self.settings.ploomes_api_base}/Products",
-                headers=self._headers(),
+            response = self._request(
+                "GET",
+                "Products",
                 params={
                     "$top": page_size,
                     "$skip": skip,
                     "$select": "Id,Code,Name,UnitPrice,Suspended",
                     "$expand": "OtherProperties",
                 },
-                timeout=self.settings.http_timeout_seconds,
             )
             self._raise_ploomes_error(response)
             values = response.json().get("value", [])
