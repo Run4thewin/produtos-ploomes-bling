@@ -1,8 +1,6 @@
 import base64
 import logging
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import httpx
 
@@ -10,6 +8,8 @@ from app.clients.token_store import TokenStore, build_token_store
 from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+TOKEN_REFRESH_SKEW = timedelta(minutes=5)
 
 
 class BlingClient:
@@ -59,7 +59,7 @@ class BlingClient:
         return response
 
     def get_access_token(self) -> str:
-        if self._access_token and datetime.now() < self._expires_at:
+        if self._has_valid_access_token():
             return self._access_token
 
         stored = self.token_store.load()
@@ -68,33 +68,16 @@ class BlingClient:
             self._refresh_token = stored.get("refresh_token")
             self._expires_at = stored.get("token_expiration_time", datetime.min)
 
-        if self._access_token and datetime.now() < self._expires_at:
+        if self._has_valid_access_token():
             return self._access_token
 
         if not self._refresh_token:
-            legacy_token = self._refresh_via_legacy_oauth()
-            if legacy_token:
-                return legacy_token
             raise RuntimeError(
-                "Refresh token do Bling ausente. Execute o OAuth no projeto legado "
-                "ploomes_bling ou envie tokens.json para o bucket GCS."
+                "Refresh token do Bling ausente. Faca a autorizacao OAuth inicial "
+                "uma vez e salve o tokens.json usado pelo servico local/GCS."
             )
 
-        try:
-            token_info = self._refresh_access_token(self._refresh_token)
-        except httpx.HTTPError:
-            logger.warning("Falha ao renovar token via API; tentando OAuth legado")
-            legacy_token = self._refresh_via_legacy_oauth(force_new=True)
-            if legacy_token:
-                return legacy_token
-            raise
-
-        self._access_token = token_info["access_token"]
-        self._refresh_token = token_info.get("refresh_token", self._refresh_token)
-        expires_in = int(token_info.get("expires_in", 3600))
-        self._expires_at = datetime.now() + timedelta(seconds=expires_in)
-        self.token_store.save(self._access_token, self._refresh_token, self._expires_at)
-        return self._access_token
+        return self._refresh_and_store_access_token(self._refresh_token)
 
     def force_refresh_access_token(self) -> str:
         stored = self.token_store.load()
@@ -102,22 +85,32 @@ class BlingClient:
             self._refresh_token = stored.get("refresh_token")
 
         if not self._refresh_token:
-            legacy_token = self._refresh_via_legacy_oauth()
-            if legacy_token:
-                return legacy_token
             raise RuntimeError(
-                "Refresh token do Bling ausente. Execute o OAuth no projeto legado "
-                "ploomes_bling ou envie tokens.json para o bucket GCS."
+                "Refresh token do Bling ausente. Faca a autorizacao OAuth inicial "
+                "uma vez e salve o tokens.json usado pelo servico local/GCS."
             )
 
+        return self._refresh_and_store_access_token(self._refresh_token)
+
+    def _has_valid_access_token(self) -> bool:
+        return bool(
+            self._access_token
+            and datetime.now() + TOKEN_REFRESH_SKEW < self._expires_at
+        )
+
+    def _refresh_and_store_access_token(self, refresh_token: str) -> str:
         try:
-            token_info = self._refresh_access_token(self._refresh_token)
-        except httpx.HTTPError:
-            logger.warning("Falha ao renovar token via API; tentando OAuth legado")
-            legacy_token = self._refresh_via_legacy_oauth()
-            if legacy_token:
-                return legacy_token
-            raise
+            token_info = self._refresh_access_token(refresh_token)
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500] if exc.response is not None else ""
+            raise RuntimeError(
+                "Nao foi possivel renovar o token do Bling via refresh_token. "
+                "Se a resposta for invalid_grant, o refresh token foi revogado/invalidado "
+                "e sera necessario refazer somente a autorizacao OAuth inicial. "
+                f"Resposta Bling: HTTP {exc.response.status_code} {body}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Erro HTTP ao renovar token do Bling: {exc}") from exc
 
         self._access_token = token_info["access_token"]
         self._refresh_token = token_info.get("refresh_token", self._refresh_token)
@@ -125,59 +118,6 @@ class BlingClient:
         self._expires_at = datetime.now() + timedelta(seconds=expires_in)
         self.token_store.save(self._access_token, self._refresh_token, self._expires_at)
         return self._access_token
-
-    def _refresh_via_legacy_oauth(self, force_new: bool = False) -> str | None:
-        legacy_path = Path(self.settings.legacy_ploomes_bling_path)
-        if not legacy_path.exists():
-            return None
-
-        legacy_module_path = str(legacy_path)
-        if legacy_module_path not in sys.path:
-            sys.path.insert(0, legacy_module_path)
-
-        try:
-            from get_autorization_token_bling import (
-                get_authorization_token_bling,
-                get_new_authorization_token_bling,
-                refresh_access_token,
-            )
-
-            token = None if force_new else get_authorization_token_bling()
-            if not token:
-                stored = self.token_store.load()
-                refresh_token = stored.get("refresh_token") if stored else None
-                token_info = None
-                if refresh_token:
-                    token_info = refresh_access_token(refresh_token)
-                if not token_info:
-                    logger.info("Abrindo OAuth Bling via Selenium (projeto legado)")
-                    token_info = get_new_authorization_token_bling()
-                if not token_info:
-                    return None
-                expires_in = int(token_info.get("expires_in", 3600))
-                expires_at = datetime.now() + timedelta(seconds=expires_in)
-                self.token_store.save(
-                    token_info["access_token"],
-                    token_info.get("refresh_token", refresh_token or ""),
-                    expires_at,
-                )
-                token = token_info["access_token"]
-
-            stored = self.token_store.load()
-            if stored:
-                self._access_token = stored.get("access_token")
-                self._refresh_token = stored.get("refresh_token")
-                self._expires_at = stored.get("token_expiration_time", datetime.min)
-            else:
-                self._access_token = token
-            logger.info("Token Bling obtido via modulo legado ploomes_bling")
-            return token
-        except Exception as exc:
-            logger.warning("OAuth legado indisponivel: %s", exc)
-            return None
-        finally:
-            if legacy_module_path in sys.path:
-                sys.path.remove(legacy_module_path)
 
     def _refresh_access_token(self, refresh_token: str) -> dict:
         credentials = f"{self.settings.bling_client_id}:{self.settings.bling_client_secret}"
