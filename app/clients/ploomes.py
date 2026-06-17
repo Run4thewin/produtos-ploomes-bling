@@ -14,9 +14,18 @@ class PloomesClient:
 
     def _headers(self) -> dict[str, str]:
         return {
-            "User-Key": self.settings.ploomes_user_key,
+            "user-key": self.settings.ploomes_user_key,
             "Content-Type": "application/json",
         }
+
+    def _raise_ploomes_error(self, response: httpx.Response) -> None:
+        if response.status_code == 401:
+            raise RuntimeError(
+                "Ploomes retornou 401 Unauthorized. Verifique se PLOOMES_USER_KEY "
+                "esta configurada no Cloud Run e se o secret ploomes-user-key contem "
+                "a chave valida do usuario de integracao."
+            )
+        response.raise_for_status()
 
     def get_product_by_id(self, product_id: int | str) -> dict:
         response = httpx.get(
@@ -25,7 +34,7 @@ class PloomesClient:
             params={"$expand": "OtherProperties"},
             timeout=self.settings.http_timeout_seconds,
         )
-        response.raise_for_status()
+        self._raise_ploomes_error(response)
         return response.json()
 
     def get_product_by_code(self, code: str) -> dict | None:
@@ -40,7 +49,7 @@ class PloomesClient:
             },
             timeout=self.settings.http_timeout_seconds,
         )
-        response.raise_for_status()
+        self._raise_ploomes_error(response)
         values = response.json().get("value", [])
         return values[0] if values else None
 
@@ -51,7 +60,7 @@ class PloomesClient:
             json=payload,
             timeout=self.settings.http_timeout_seconds,
         )
-        response.raise_for_status()
+        self._raise_ploomes_error(response)
         return response.json()
 
     def update_product(self, product_id: int, payload: dict) -> dict:
@@ -61,7 +70,7 @@ class PloomesClient:
             json=payload,
             timeout=self.settings.http_timeout_seconds,
         )
-        response.raise_for_status()
+        self._raise_ploomes_error(response)
         return response.json()
 
     def get_deal_by_id(self, deal_id: int | str) -> dict:
@@ -75,7 +84,7 @@ class PloomesClient:
             },
             timeout=self.settings.http_timeout_seconds,
         )
-        response.raise_for_status()
+        self._raise_ploomes_error(response)
         values = response.json().get("value", [])
         if not values:
             raise RuntimeError(f"Deal Ploomes nao encontrado: {deal_id}")
@@ -93,7 +102,7 @@ class PloomesClient:
             },
             timeout=self.settings.http_timeout_seconds,
         )
-        response.raise_for_status()
+        self._raise_ploomes_error(response)
         values = response.json().get("value", [])
         return values[0] if values else None
 
@@ -104,7 +113,7 @@ class PloomesClient:
             json=payload,
             timeout=self.settings.http_timeout_seconds,
         )
-        response.raise_for_status()
+        self._raise_ploomes_error(response)
         body = response.json() if response.content else {}
         return body.get("value", body)
 
@@ -122,7 +131,7 @@ class PloomesClient:
                 },
                 timeout=self.settings.http_timeout_seconds,
             )
-            response.raise_for_status()
+            self._raise_ploomes_error(response)
             values = response.json().get("value", [])
             if not values:
                 break

@@ -31,6 +31,33 @@ class BlingClient:
             "Content-Type": "application/json",
         }
 
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        retry_on_unauthorized: bool = True,
+        **kwargs,
+    ) -> httpx.Response:
+        response = httpx.request(
+            method,
+            f"{self.settings.bling_api_base}/{path.lstrip('/')}",
+            headers=self._auth_headers(),
+            timeout=self.settings.http_timeout_seconds,
+            **kwargs,
+        )
+        if response.status_code == 401 and retry_on_unauthorized:
+            logger.warning("Bling retornou 401; renovando token e tentando novamente")
+            self.force_refresh_access_token()
+            response = httpx.request(
+                method,
+                f"{self.settings.bling_api_base}/{path.lstrip('/')}",
+                headers=self._auth_headers(),
+                timeout=self.settings.http_timeout_seconds,
+                **kwargs,
+            )
+        return response
+
     def get_access_token(self) -> str:
         if self._access_token and datetime.now() < self._expires_at:
             return self._access_token
@@ -57,6 +84,36 @@ class BlingClient:
             token_info = self._refresh_access_token(self._refresh_token)
         except httpx.HTTPError:
             logger.warning("Falha ao renovar token via API; tentando OAuth legado")
+            legacy_token = self._refresh_via_legacy_oauth(force_new=True)
+            if legacy_token:
+                return legacy_token
+            raise
+
+        self._access_token = token_info["access_token"]
+        self._refresh_token = token_info.get("refresh_token", self._refresh_token)
+        expires_in = int(token_info.get("expires_in", 3600))
+        self._expires_at = datetime.now() + timedelta(seconds=expires_in)
+        self.token_store.save(self._access_token, self._refresh_token, self._expires_at)
+        return self._access_token
+
+    def force_refresh_access_token(self) -> str:
+        stored = self.token_store.load()
+        if stored:
+            self._refresh_token = stored.get("refresh_token")
+
+        if not self._refresh_token:
+            legacy_token = self._refresh_via_legacy_oauth()
+            if legacy_token:
+                return legacy_token
+            raise RuntimeError(
+                "Refresh token do Bling ausente. Execute o OAuth no projeto legado "
+                "ploomes_bling ou envie tokens.json para o bucket GCS."
+            )
+
+        try:
+            token_info = self._refresh_access_token(self._refresh_token)
+        except httpx.HTTPError:
+            logger.warning("Falha ao renovar token via API; tentando OAuth legado")
             legacy_token = self._refresh_via_legacy_oauth()
             if legacy_token:
                 return legacy_token
@@ -69,7 +126,7 @@ class BlingClient:
         self.token_store.save(self._access_token, self._refresh_token, self._expires_at)
         return self._access_token
 
-    def _refresh_via_legacy_oauth(self) -> str | None:
+    def _refresh_via_legacy_oauth(self, force_new: bool = False) -> str | None:
         legacy_path = Path(self.settings.legacy_ploomes_bling_path)
         if not legacy_path.exists():
             return None
@@ -85,7 +142,7 @@ class BlingClient:
                 refresh_access_token,
             )
 
-            token = get_authorization_token_bling()
+            token = None if force_new else get_authorization_token_bling()
             if not token:
                 stored = self.token_store.load()
                 refresh_token = stored.get("refresh_token") if stored else None
@@ -140,6 +197,13 @@ class BlingClient:
         return response.json()
 
     def _raise_bling_error(self, response: httpx.Response) -> None:
+        if response.status_code == 401:
+            raise RuntimeError(
+                "Bling retornou 401 Unauthorized mesmo apos tentativa de renovacao. "
+                "Renove o OAuth do Bling e atualize o tokens.json usado pelo servico "
+                "local/GCS. Tambem confirme se BLING_CLIENT_ID e BLING_CLIENT_SECRET "
+                "sao do mesmo app que gerou o refresh token."
+            )
         if response.status_code == 403:
             body = response.json() if response.content else {}
             error_type = body.get("error", {}).get("type")
@@ -176,21 +240,16 @@ class BlingClient:
         if tipo_pessoa is not None:
             params["tipoPessoa"] = tipo_pessoa
 
-        response = httpx.get(
-            f"{self.settings.bling_api_base}/contatos",
-            headers=self._auth_headers(),
+        response = self._request(
+            "GET",
+            "contatos",
             params=params,
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_bling_error(response)
         return response.json()
 
     def get_contact(self, contact_id: int | str) -> dict:
-        response = httpx.get(
-            f"{self.settings.bling_api_base}/contatos/{contact_id}",
-            headers=self._auth_headers(),
-            timeout=self.settings.http_timeout_seconds,
-        )
+        response = self._request("GET", f"contatos/{contact_id}")
         self._raise_bling_error(response)
         return response.json()["data"]
 
@@ -261,75 +320,62 @@ class BlingClient:
         }
 
     def get_product_by_code(self, code: str) -> dict | None:
-        response = httpx.get(
-            f"{self.settings.bling_api_base}/produtos",
-            headers=self._auth_headers(),
+        response = self._request(
+            "GET",
+            "produtos",
             params={"codigo": code, "limite": 1, "pagina": 1},
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_bling_error(response)
         items = response.json().get("data", [])
         return items[0] if items else None
 
     def create_product(self, payload: dict) -> dict:
-        response = httpx.post(
-            f"{self.settings.bling_api_base}/produtos",
-            headers=self._auth_headers(),
+        response = self._request(
+            "POST",
+            "produtos",
             json=payload,
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_bling_error(response)
         body = response.json()
         return body.get("data", body)
 
     def update_product(self, product_id: int | str, payload: dict) -> dict:
-        response = httpx.put(
-            f"{self.settings.bling_api_base}/produtos/{product_id}",
-            headers=self._auth_headers(),
+        response = self._request(
+            "PUT",
+            f"produtos/{product_id}",
             json=payload,
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_bling_error(response)
         body = response.json()
         return body.get("data", body)
 
     def create_sales_order(self, payload: dict) -> dict:
-        response = httpx.post(
-            f"{self.settings.bling_api_base}/pedidos/vendas",
-            headers=self._auth_headers(),
+        response = self._request(
+            "POST",
+            "pedidos/vendas",
             json=payload,
-            timeout=self.settings.http_timeout_seconds,
         )
         self._raise_bling_error(response)
         body = response.json()
         return body.get("data", body)
 
     def get_sales_order(self, order_id: int | str) -> dict:
-        response = httpx.get(
-            f"{self.settings.bling_api_base}/pedidos/vendas/{order_id}",
-            headers=self._auth_headers(),
-            timeout=self.settings.http_timeout_seconds,
-        )
+        response = self._request("GET", f"pedidos/vendas/{order_id}")
         self._raise_bling_error(response)
         return response.json()["data"]
 
     def get_product(self, product_id: int | str) -> dict:
-        response = httpx.get(
-            f"{self.settings.bling_api_base}/produtos/{product_id}",
-            headers=self._auth_headers(),
-            timeout=self.settings.http_timeout_seconds,
-        )
+        response = self._request("GET", f"produtos/{product_id}")
         self._raise_bling_error(response)
         return response.json()["data"]
 
     def iter_products(self, page_size: int = 100):
         page = 1
         while True:
-            response = httpx.get(
-                f"{self.settings.bling_api_base}/produtos",
-                headers=self._auth_headers(),
+            response = self._request(
+                "GET",
+                "produtos",
                 params={"pagina": page, "limite": page_size},
-                timeout=self.settings.http_timeout_seconds,
             )
             self._raise_bling_error(response)
             payload = response.json()
