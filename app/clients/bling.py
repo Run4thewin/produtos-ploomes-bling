@@ -15,6 +15,17 @@ RATE_LIMIT_RETRY_DELAYS = (2.0, 5.0)
 MAX_RETRY_AFTER_SECONDS = 15.0
 
 
+def build_bling_oauth_headers(client_id: str, client_secret: str) -> dict[str, str]:
+    credentials = f"{client_id}:{client_secret}"
+    encoded = base64.b64encode(credentials.encode()).decode()
+    return {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "Authorization": f"Basic {encoded}",
+        "enable-jwt": "1",
+    }
+
+
 class BlingClient:
     def __init__(self, settings: Settings | None = None, token_store: TokenStore | None = None):
         self.settings = settings or get_settings()
@@ -162,15 +173,12 @@ class BlingClient:
         return self._access_token
 
     def _refresh_access_token(self, refresh_token: str) -> dict:
-        credentials = f"{self.settings.bling_client_id}:{self.settings.bling_client_secret}"
-        encoded = base64.b64encode(credentials.encode()).decode()
         response = httpx.post(
             "https://www.bling.com.br/Api/v3/oauth/token",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "1.0",
-                "Authorization": f"Basic {encoded}",
-            },
+            headers=build_bling_oauth_headers(
+                self.settings.bling_client_id,
+                self.settings.bling_client_secret,
+            ),
             data={"grant_type": "refresh_token", "refresh_token": refresh_token},
             timeout=self.settings.http_timeout_seconds,
         )

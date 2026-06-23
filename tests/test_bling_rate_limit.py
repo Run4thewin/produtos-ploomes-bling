@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import httpx
 
-from app.clients.bling import BlingClient
+from app.clients.bling import BlingClient, build_bling_oauth_headers
 from app.config import Settings
 
 
@@ -21,6 +21,13 @@ class FakeTokenStore:
 
 
 class BlingRateLimitTest(unittest.TestCase):
+    def test_oauth_headers_request_jwt_tokens(self):
+        headers = build_bling_oauth_headers("client-id", "client-secret")
+
+        self.assertEqual(headers["enable-jwt"], "1")
+        self.assertEqual(headers["Accept"], "application/json")
+        self.assertTrue(headers["Authorization"].startswith("Basic "))
+
     def test_create_sales_order_retries_after_rate_limit(self):
         url = "https://api.bling.com.br/Api/v3/pedidos/vendas"
         request = httpx.Request("POST", url)

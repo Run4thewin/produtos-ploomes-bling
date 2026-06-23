@@ -8,7 +8,6 @@ Uso:
 """
 
 import argparse
-import base64
 import secrets
 import sys
 from datetime import datetime, timedelta
@@ -19,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx
 
+from app.clients.bling import build_bling_oauth_headers
 from app.clients.token_store import build_token_store
 from app.config import get_settings
 
@@ -56,15 +56,12 @@ def print_authorization_url() -> None:
 
 def exchange_code_for_tokens(code: str) -> None:
     settings = get_settings()
-    credentials = f"{settings.bling_client_id}:{settings.bling_client_secret}"
-    encoded = base64.b64encode(credentials.encode()).decode()
     response = httpx.post(
         TOKEN_URL,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "Authorization": f"Basic {encoded}",
-        },
+        headers=build_bling_oauth_headers(
+            settings.bling_client_id,
+            settings.bling_client_secret,
+        ),
         data={
             "grant_type": "authorization_code",
             "code": code,
