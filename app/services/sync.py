@@ -4,6 +4,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+import httpx
+
 from app.clients.bling import BlingClient
 from app.clients.ploomes import PloomesClient
 from app.config import Settings, get_settings
@@ -29,7 +31,21 @@ class ProductSyncService:
         if action == "deleted":
             return self._suspend_by_bling_id(product_id)
 
-        bling_product = self.bling.get_product(product_id)
+        try:
+            bling_product = self.bling.get_product(product_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning(
+                    "%s SKIP bling_id=%s | produto nao encontrado no Bling",
+                    SYNC_PREFIX,
+                    product_id,
+                )
+                return {
+                    "action": "skipped",
+                    "reason": "produto nao encontrado no Bling",
+                    "bling_id": product_id,
+                }
+            raise
         return self.upsert_from_bling_product(bling_product)
 
     def upsert_from_bling_product(self, bling_product: dict) -> dict:
@@ -98,7 +114,21 @@ class ProductSyncService:
         }
 
     def _suspend_by_bling_id(self, product_id: int | str) -> dict:
-        bling_product = self.bling.get_product(product_id)
+        try:
+            bling_product = self.bling.get_product(product_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning(
+                    "%s SKIP delete bling_id=%s | produto nao encontrado no Bling",
+                    SYNC_PREFIX,
+                    product_id,
+                )
+                return {
+                    "action": "skipped",
+                    "reason": "produto nao encontrado no Bling",
+                    "bling_id": product_id,
+                }
+            raise
         code = (bling_product.get("codigo") or "").strip()
         if not code:
             return {"action": "skipped", "reason": "produto sem codigo", "bling_id": product_id}
