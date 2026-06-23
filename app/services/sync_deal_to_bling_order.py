@@ -34,10 +34,24 @@ class DealToBlingOrderSyncService:
         self.ploomes = ploomes or PloomesClient(self.settings)
 
     def create_bling_order_from_deal(self, deal_id: int | str) -> dict[str, Any]:
+        logger.info("[DEAL_ORDER] INICIO deal_id=%s | buscando Deal no Ploomes", deal_id)
         deal = self.ploomes.get_deal_by_id(deal_id)
+        logger.info(
+            "[DEAL_ORDER] Deal carregado | deal_id=%s pipeline_id=%s stage_id=%s title=%s",
+            deal.get("Id"),
+            deal.get("PipelineId"),
+            deal.get("StageId"),
+            deal.get("Title") or "-",
+        )
 
         try:
-            return self._create_bling_order_from_deal(deal)
+            result = self._create_bling_order_from_deal(deal)
+            logger.info(
+                "[DEAL_ORDER] FIM deal_id=%s action=%s",
+                deal_id,
+                result.get("action"),
+            )
+            return result
         except DealOrderValidationError as exc:
             logger.warning("Deal Ploomes %s nao processado: %s", deal_id, exc)
             self._mark_deal_error(deal["Id"], str(exc))
@@ -58,6 +72,12 @@ class DealToBlingOrderSyncService:
     def _create_bling_order_from_deal(self, deal: dict[str, Any]) -> dict[str, Any]:
         rule = self._find_stage_rule(deal)
         if not rule:
+            logger.info(
+                "[DEAL_ORDER] SKIP deal_id=%s | stage nao configurado pipeline_id=%s stage_id=%s",
+                deal.get("Id"),
+                deal.get("PipelineId"),
+                deal.get("StageId"),
+            )
             return {
                 "action": "skipped",
                 "reason": "stage_nao_configurado",
@@ -71,6 +91,10 @@ class DealToBlingOrderSyncService:
             self.settings.ploomes_deal_order_field,
         )
         if self._looks_like_existing_order(existing_order):
+            logger.info(
+                "[DEAL_ORDER] SKIP deal_id=%s | pedido ja registrado no Ploomes",
+                deal.get("Id"),
+            )
             return {
                 "action": "skipped",
                 "reason": "already_processed",
@@ -78,17 +102,56 @@ class DealToBlingOrderSyncService:
                 "order_reference": existing_order,
             }
 
+        logger.info(
+            "[DEAL_ORDER] Stage aceito | deal_id=%s pipeline_id=%s stage_origem=%s stage_destino=%s",
+            deal.get("Id"),
+            rule.pipeline_id,
+            rule.source_stage_id,
+            rule.target_stage_id,
+        )
+        logger.info("[DEAL_ORDER] Buscando ultima quote | deal_id=%s", deal.get("Id"))
         quote = self.ploomes.get_latest_quote_by_deal(deal["Id"])
         if not quote:
             raise DealOrderValidationError("Deal sem quote/orcamento para gerar pedido")
+        logger.info(
+            "[DEAL_ORDER] Quote carregada | deal_id=%s quote_id=%s items=%s",
+            deal.get("Id"),
+            quote.get("Id"),
+            len(quote.get("Products") or []),
+        )
 
         payload = self._build_sales_order_payload(deal, quote)
+        logger.info(
+            "[DEAL_ORDER] Payload Bling montado | deal_id=%s contato_id=%s items=%s parcelas=%s vendedor_id=%s total_itens=%.2f",
+            deal.get("Id"),
+            payload.get("contato", {}).get("id"),
+            len(payload.get("itens") or []),
+            len(payload.get("parcelas") or []),
+            payload.get("vendedor", {}).get("id", "-"),
+            sum(
+                float(item.get("quantidade") or 0) * float(item.get("valor") or 0)
+                for item in payload.get("itens") or []
+            ),
+        )
+        logger.info("[DEAL_ORDER] Criando pedido no Bling | deal_id=%s", deal.get("Id"))
         created = self.bling.create_sales_order(payload)
         order_id = created.get("id")
         if not order_id:
             raise RuntimeError(f"Bling criou pedido sem retornar id: {created}")
 
+        logger.info(
+            "[DEAL_ORDER] Pedido criado no Bling | deal_id=%s bling_order_id=%s",
+            deal.get("Id"),
+            order_id,
+        )
+        logger.info("[DEAL_ORDER] Buscando pedido criado no Bling | order_id=%s", order_id)
         order = self.bling.get_sales_order(order_id)
+        logger.info(
+            "[DEAL_ORDER] Pedido Bling carregado | deal_id=%s bling_order_id=%s numero=%s",
+            deal.get("Id"),
+            order_id,
+            order.get("numero") or "-",
+        )
         self._mark_deal_success(deal, order, rule)
 
         logger.info(
@@ -109,10 +172,20 @@ class DealToBlingOrderSyncService:
         if not document:
             raise DealOrderValidationError("Contato do Deal sem CPF/CNPJ")
 
+        logger.info(
+            "[DEAL_ORDER] Buscando contato no Bling | deal_id=%s documento_final=%s",
+            deal.get("Id"),
+            document[-4:],
+        )
         bling_contact = self.bling.get_contact_by_document(document)
         if not bling_contact:
             name = contact.get("Name") or deal.get("ContactName") or document
             raise DealOrderValidationError(f"Cliente {name} CPF/CNPJ {document} nao cadastrado no Bling")
+        logger.info(
+            "[DEAL_ORDER] Contato Bling encontrado | deal_id=%s bling_contact_id=%s",
+            deal.get("Id"),
+            bling_contact.get("id"),
+        )
 
         items, total = self._build_items(quote)
         purchase_order = self._get_property_value(
@@ -130,6 +203,13 @@ class DealToBlingOrderSyncService:
         )
         if not payment_method_id:
             raise DealOrderValidationError(f"Forma de pagamento nao mapeada: {payment_method_name}")
+        logger.info(
+            "[DEAL_ORDER] Pagamento mapeado | deal_id=%s forma=%s bling_forma_id=%s dias=%s",
+            deal.get("Id"),
+            payment_method_name,
+            payment_method_id,
+            self._payment_days(deal),
+        )
 
         payment_days = self._payment_days(deal)
         external_notes = self._get_property_value(
@@ -171,6 +251,13 @@ class DealToBlingOrderSyncService:
         transport = self._build_transport(deal, freight_value)
         if transport:
             payload["transporte"] = transport
+            logger.info(
+                "[DEAL_ORDER] Transporte mapeado | deal_id=%s frete_por_conta=%s transportadora_id=%s frete=%s",
+                deal.get("Id"),
+                transport.get("fretePorConta"),
+                transport.get("contato", {}).get("id", "-"),
+                transport.get("frete", "-"),
+            )
 
         return payload
 
@@ -291,6 +378,12 @@ class DealToBlingOrderSyncService:
         return rules
 
     def _mark_deal_error(self, deal_id: int | str, message: str) -> None:
+        logger.info(
+            "[DEAL_ORDER] Marcando Deal com erro | deal_id=%s error_stage_id=%s mensagem=%s",
+            deal_id,
+            self.settings.ploomes_deal_error_stage_id,
+            message[:200],
+        )
         self.ploomes.update_deal(
             deal_id,
             {
@@ -317,6 +410,13 @@ class DealToBlingOrderSyncService:
         order_reference = (
             f"Pedido Bling {order_number}: "
             f"https://www.bling.com.br/vendas.php#edit/{order_id}"
+        )
+        logger.info(
+            "[DEAL_ORDER] Marcando Deal com sucesso | deal_id=%s stage_destino=%s order_id=%s order_number=%s",
+            deal.get("Id"),
+            rule.target_stage_id,
+            order_id,
+            order_number,
         )
         self.ploomes.update_deal(
             deal["Id"],

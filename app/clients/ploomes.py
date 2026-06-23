@@ -36,12 +36,22 @@ class PloomesClient:
 
         for attempt in range(1, 4):
             try:
+                started = time.monotonic()
                 response = httpx.request(
                     method,
                     f"{self.settings.ploomes_api_base}/{path.lstrip('/')}",
                     headers=self._headers(),
                     timeout=timeout,
                     **kwargs,
+                )
+                elapsed_ms = round((time.monotonic() - started) * 1000)
+                logger.info(
+                    "Ploomes HTTP | method=%s path=%s status=%s attempt=%s elapsed_ms=%s",
+                    method,
+                    path,
+                    response.status_code,
+                    attempt,
+                    elapsed_ms,
                 )
                 if response.status_code not in PLOOMES_TRANSIENT_STATUS:
                     return response

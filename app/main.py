@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -48,6 +49,14 @@ def _check_ploomes_validation_key(validation_key: str | None) -> None:
     expected = settings.ploomes_webhook_validation_key
     if expected and validation_key != expected:
         raise HTTPException(status_code=401, detail="ValidationKey invalida")
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
+
+
+def _payload_keys(payload: dict[str, Any]) -> list[str]:
+    return sorted(str(key) for key in payload.keys())
 
 
 @app.get("/health")
@@ -159,14 +168,21 @@ async def bling_webhook(
     request: Request,
     x_bling_signature_256: str | None = Header(default=None),
 ) -> dict[str, str]:
+    started = time.monotonic()
     settings = get_settings()
     raw_body = await request.body()
+    logger.info(
+        "Webhook Bling recebido | bytes=%s assinatura=%s",
+        len(raw_body),
+        "presente" if x_bling_signature_256 else "ausente",
+    )
 
     if not verify_bling_signature(
         raw_body,
         x_bling_signature_256,
         settings.bling_client_secret,
     ):
+        logger.warning("Webhook Bling rejeitado | motivo=assinatura_invalida elapsed_ms=%s", _elapsed_ms(started))
         raise HTTPException(status_code=401, detail="Assinatura invalida")
 
     payload: dict[str, Any] = await request.json()
@@ -174,12 +190,26 @@ async def bling_webhook(
     data = payload.get("data") or {}
     product_id = data.get("id")
     event_id = payload.get("eventId")
+    logger.info(
+        "Webhook Bling parseado | event_id=%s action=%s product_id=%s keys=%s",
+        event_id or "-",
+        action,
+        product_id or "-",
+        _payload_keys(payload),
+    )
 
     if not product_id:
         logger.warning("Webhook Bling sem product id: %s", payload)
         return {"status": "ignored"}
 
     ProductEventQueue(settings).enqueue_bling(product_id, action, event_id)
+    logger.info(
+        "Webhook Bling aceito | event_id=%s action=%s product_id=%s elapsed_ms=%s",
+        event_id or "-",
+        action,
+        product_id,
+        _elapsed_ms(started),
+    )
     return {"status": "accepted"}
 
 
@@ -188,11 +218,17 @@ async def ploomes_webhook(
     request: Request,
     validation_key: str | None = Query(default=None),
 ) -> dict[str, Any]:
+    started = time.monotonic()
     settings = get_settings()
     _check_ploomes_validation_key(validation_key)
 
     payload: dict[str, Any] = await request.json()
     parsed = parse_ploomes_webhook(payload, settings.ploomes_product_entity_id)
+    logger.info(
+        "Webhook Ploomes produto recebido | parsed=%s keys=%s",
+        parsed,
+        _payload_keys(payload),
+    )
 
     if parsed.get("status") != "accepted":
         logger.info("Webhook Ploomes ignorado: %s", parsed)
@@ -203,6 +239,12 @@ async def ploomes_webhook(
         return {"status": "ignored", "reason": "delete_nao_processado"}
 
     ProductEventQueue(settings).enqueue_ploomes(parsed["product_id"], action)
+    logger.info(
+        "Webhook Ploomes produto aceito | product_id=%s action=%s elapsed_ms=%s",
+        parsed["product_id"],
+        action,
+        _elapsed_ms(started),
+    )
     return {"status": "accepted", "product_id": parsed["product_id"], "action": action}
 
 
@@ -211,11 +253,17 @@ async def ploomes_deal_webhook(
     request: Request,
     validation_key: str | None = Query(default=None),
 ) -> dict[str, Any]:
+    started = time.monotonic()
     settings = get_settings()
     _check_ploomes_validation_key(validation_key)
 
     payload: dict[str, Any] = await request.json()
     parsed = parse_ploomes_deal_webhook(payload, settings.ploomes_deal_entity_id)
+    logger.info(
+        "Webhook Ploomes Deal recebido | parsed=%s keys=%s",
+        parsed,
+        _payload_keys(payload),
+    )
 
     if parsed.get("status") != "accepted":
         logger.info("Webhook Ploomes Deal ignorado: %s", parsed)
@@ -227,6 +275,12 @@ async def ploomes_deal_webhook(
     try:
         result = DealToBlingOrderSyncService(settings).create_bling_order_from_deal(
             parsed["deal_id"]
+        )
+        logger.info(
+            "Webhook Ploomes Deal processado | deal_id=%s result_action=%s elapsed_ms=%s",
+            parsed["deal_id"],
+            result.get("action"),
+            _elapsed_ms(started),
         )
         return {"status": "processed", "deal_id": parsed["deal_id"], "result": result}
     except RuntimeError as exc:
@@ -242,8 +296,22 @@ def process_bling_product_task(
     body: ProcessBlingProductPayload,
     x_internal_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    started = time.monotonic()
+    logger.info(
+        "Task Bling produto recebida | product_id=%s action=%s event_id=%s",
+        body.product_id,
+        body.action,
+        body.event_id or "-",
+    )
     _check_internal_secret(x_internal_secret)
     result = ProductSyncService().upsert_from_bling_id(body.product_id, body.action)
+    logger.info(
+        "Task Bling produto concluida | product_id=%s action=%s result_action=%s elapsed_ms=%s",
+        body.product_id,
+        body.action,
+        result.get("action"),
+        _elapsed_ms(started),
+    )
     return {"status": "processed", "result": result}
 
 
@@ -252,8 +320,21 @@ def process_ploomes_product_task(
     body: ProcessPloomesProductPayload,
     x_internal_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    started = time.monotonic()
+    logger.info(
+        "Task Ploomes produto recebida | product_id=%s action=%s",
+        body.product_id,
+        body.action,
+    )
     _check_internal_secret(x_internal_secret)
     result = PloomesToBlingSyncService().upsert_from_ploomes_id(body.product_id, body.action)
+    logger.info(
+        "Task Ploomes produto concluida | product_id=%s action=%s result_action=%s elapsed_ms=%s",
+        body.product_id,
+        body.action,
+        result.get("action"),
+        _elapsed_ms(started),
+    )
     return {"status": "processed", "result": result}
 
 

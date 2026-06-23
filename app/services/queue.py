@@ -43,12 +43,20 @@ class ProductEventQueue:
         process_path: str,
         processor,
     ) -> None:
+        logger.info(
+            "Fila produto recebida | direction=%s mode=%s process_path=%s payload=%s",
+            direction,
+            "cloud_tasks" if self.settings.cloud_tasks_enabled else "direto",
+            process_path,
+            payload,
+        )
         if self.settings.cloud_tasks_enabled:
             self._enqueue_cloud_task(payload, process_path)
             return
 
-        logger.info("Processamento direto (%s): %s", direction, payload)
+        logger.info("Processamento direto iniciado | direction=%s payload=%s", direction, payload)
         processor()
+        logger.info("Processamento direto concluido | direction=%s payload=%s", direction, payload)
 
     def _process_bling(self, product_id: int | str, action: str) -> None:
         from app.services.sync import ProductSyncService
@@ -64,6 +72,7 @@ class ProductEventQueue:
         from google.cloud import tasks_v2
         from google.protobuf import duration_pb2
 
+        target_url = f"{self.settings.service_url.rstrip('/')}{process_path}"
         client = tasks_v2.CloudTasksClient()
         parent = client.queue_path(
             self.settings.gcp_project,
@@ -73,7 +82,7 @@ class ProductEventQueue:
 
         http_request: dict = {
             "http_method": tasks_v2.HttpMethod.POST,
-            "url": f"{self.settings.service_url.rstrip('/')}{process_path}",
+            "url": target_url,
             "headers": {
                 "Content-Type": "application/json",
                 "X-Internal-Secret": self.settings.internal_secret,
@@ -93,4 +102,10 @@ class ProductEventQueue:
         }
 
         client.create_task(request={"parent": parent, "task": task})
-        logger.info("Evento enfileirado no Cloud Tasks: %s", payload)
+        logger.info(
+            "Evento enfileirado no Cloud Tasks | queue=%s location=%s url=%s payload=%s",
+            self.settings.cloud_tasks_queue,
+            self.settings.cloud_tasks_location,
+            target_url,
+            payload,
+        )

@@ -45,8 +45,10 @@ class BlingClient:
         url = f"{self.settings.bling_api_base}/{path.lstrip('/')}"
         unauthorized_retried = False
         rate_limit_retries = 0
+        attempt = 1
 
         while True:
+            started = time.monotonic()
             response = httpx.request(
                 method,
                 url,
@@ -54,11 +56,21 @@ class BlingClient:
                 timeout=self.settings.http_timeout_seconds,
                 **kwargs,
             )
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            logger.info(
+                "Bling HTTP | method=%s path=%s status=%s attempt=%s elapsed_ms=%s",
+                method,
+                path,
+                response.status_code,
+                attempt,
+                elapsed_ms,
+            )
 
             if response.status_code == 401 and retry_on_unauthorized and not unauthorized_retried:
                 logger.warning("Bling retornou 401; renovando token e tentando novamente")
                 self.force_refresh_access_token()
                 unauthorized_retried = True
+                attempt += 1
                 continue
 
             if response.status_code == 429 and rate_limit_retries < len(RATE_LIMIT_RETRY_DELAYS):
@@ -72,6 +84,7 @@ class BlingClient:
                     rate_limit_retries + 1,
                 )
                 time.sleep(delay)
+                attempt += 1
                 continue
 
             return response
@@ -161,6 +174,7 @@ class BlingClient:
             data={"grant_type": "refresh_token", "refresh_token": refresh_token},
             timeout=self.settings.http_timeout_seconds,
         )
+        logger.info("Bling OAuth HTTP | status=%s", response.status_code)
         response.raise_for_status()
         logger.info("Access token Bling renovado")
         return response.json()
