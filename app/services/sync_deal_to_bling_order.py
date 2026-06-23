@@ -86,22 +86,6 @@ class DealToBlingOrderSyncService:
                 "stage_id": deal.get("StageId"),
             }
 
-        existing_order = self._get_property_value(
-            deal,
-            self.settings.ploomes_deal_order_field,
-        )
-        if self._looks_like_existing_order(existing_order):
-            logger.info(
-                "[DEAL_ORDER] SKIP deal_id=%s | pedido ja registrado no Ploomes",
-                deal.get("Id"),
-            )
-            return {
-                "action": "skipped",
-                "reason": "already_processed",
-                "deal_id": deal.get("Id"),
-                "order_reference": existing_order,
-            }
-
         logger.info(
             "[DEAL_ORDER] Stage aceito | deal_id=%s pipeline_id=%s stage_origem=%s stage_destino=%s",
             deal.get("Id"),
@@ -467,12 +451,6 @@ class DealToBlingOrderSyncService:
             if self._normalize_key(raw_key) == normalized_key:
                 return value.strip()
         return None
-
-    def _looks_like_existing_order(self, value: Any) -> bool:
-        if not value:
-            return False
-        text = str(value).lower()
-        return "bling.com.br/vendas" in text or "pedido bling" in text
 
     def _clean_document(self, value: Any) -> str | None:
         if value is None:

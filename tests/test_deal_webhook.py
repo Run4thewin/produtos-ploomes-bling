@@ -125,7 +125,7 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertEqual(len(bling.created_payload["parcelas"]), 2)
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110008939)
 
-    def test_service_skips_existing_bling_order_reference(self):
+    def test_service_attempts_bling_order_even_with_existing_reference(self):
         bling = FakeBlingClient()
         ploomes = FakePloomesClient(
             make_deal("Pedido Bling 9876: https://www.bling.com.br/vendas.php#edit/12345"),
@@ -135,10 +135,10 @@ class PloomesDealWebhookTest(unittest.TestCase):
 
         result = service.create_bling_order_from_deal(55)
 
-        self.assertEqual(result["action"], "skipped")
-        self.assertEqual(result["reason"], "already_processed")
-        self.assertIsNone(bling.created_payload)
-        self.assertEqual(ploomes.updated_deals, [])
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["bling_order_id"], 12345)
+        self.assertIsNotNone(bling.created_payload)
+        self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110008939)
 
 
 if __name__ == "__main__":
