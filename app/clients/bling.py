@@ -1,5 +1,6 @@
 import base64
 import logging
+import time
 from datetime import datetime, timedelta
 
 import httpx
@@ -10,6 +11,8 @@ from app.config import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 TOKEN_REFRESH_SKEW = timedelta(minutes=5)
+RATE_LIMIT_RETRY_DELAYS = (2.0, 5.0)
+MAX_RETRY_AFTER_SECONDS = 15.0
 
 
 class BlingClient:
@@ -39,24 +42,50 @@ class BlingClient:
         retry_on_unauthorized: bool = True,
         **kwargs,
     ) -> httpx.Response:
-        response = httpx.request(
-            method,
-            f"{self.settings.bling_api_base}/{path.lstrip('/')}",
-            headers=self._auth_headers(),
-            timeout=self.settings.http_timeout_seconds,
-            **kwargs,
-        )
-        if response.status_code == 401 and retry_on_unauthorized:
-            logger.warning("Bling retornou 401; renovando token e tentando novamente")
-            self.force_refresh_access_token()
+        url = f"{self.settings.bling_api_base}/{path.lstrip('/')}"
+        unauthorized_retried = False
+        rate_limit_retries = 0
+
+        while True:
             response = httpx.request(
                 method,
-                f"{self.settings.bling_api_base}/{path.lstrip('/')}",
+                url,
                 headers=self._auth_headers(),
                 timeout=self.settings.http_timeout_seconds,
                 **kwargs,
             )
-        return response
+
+            if response.status_code == 401 and retry_on_unauthorized and not unauthorized_retried:
+                logger.warning("Bling retornou 401; renovando token e tentando novamente")
+                self.force_refresh_access_token()
+                unauthorized_retried = True
+                continue
+
+            if response.status_code == 429 and rate_limit_retries < len(RATE_LIMIT_RETRY_DELAYS):
+                delay = self._rate_limit_delay(response, rate_limit_retries)
+                rate_limit_retries += 1
+                logger.warning(
+                    "Bling retornou 429 em %s %s; aguardando %.1fs antes da tentativa %s",
+                    method,
+                    path,
+                    delay,
+                    rate_limit_retries + 1,
+                )
+                time.sleep(delay)
+                continue
+
+            return response
+
+    def _rate_limit_delay(self, response: httpx.Response, retry_index: int) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = RATE_LIMIT_RETRY_DELAYS[retry_index]
+            else:
+                return min(max(delay, 0.0), MAX_RETRY_AFTER_SECONDS)
+        return RATE_LIMIT_RETRY_DELAYS[retry_index]
 
     def get_access_token(self) -> str:
         if self._has_valid_access_token():
