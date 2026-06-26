@@ -2,3 +2,6 @@
 selenium
 webdriver-manager
 pandas
+openpyxl
+psycopg2-binary
+gspread

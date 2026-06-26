@@ -1,5 +1,8 @@
 .env
 tokens.json
+service_account.json
+client_secret*.json
+relatorios/
 __pycache__/
 *.pyc
 .venv/
