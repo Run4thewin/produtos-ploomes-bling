@@ -58,7 +58,6 @@ class Settings(BaseSettings):
         "Transporte proprio pelo remetente:3"
     )
     bling_seller_map: str = (
-        "110010961:15596362133,"
         "110010966:15596341520,"
         "110010962:15596314450,"
         "110002267:15596475293,"
