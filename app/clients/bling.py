@@ -204,6 +204,17 @@ class BlingClient:
                     f"App Bling sem permissao para este recurso ({scope}). "
                     "Adicione o escopo no developer.bling.com.br e renove o token."
                 )
+        if response.status_code >= 400:
+            try:
+                body = response.json()
+            except ValueError:
+                body = response.text
+            logger.warning(
+                "Bling retornou erro | status=%s url=%s body=%s",
+                response.status_code,
+                response.request.url if response.request else "-",
+                body,
+            )
         response.raise_for_status()
 
     def search_contacts(

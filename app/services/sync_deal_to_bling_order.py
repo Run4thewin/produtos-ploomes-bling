@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+import httpx
+
 from app.clients.bling import BlingClient
 from app.clients.ploomes import PloomesClient
 from app.config import Settings, get_settings
@@ -67,6 +69,15 @@ class DealToBlingOrderSyncService:
                 "action": "error_registered",
                 "deal_id": str(deal_id),
                 "reason": str(exc),
+            }
+        except httpx.HTTPStatusError as exc:
+            reason = self._describe_bling_http_error(exc)
+            logger.warning("Erro Bling ao processar Deal Ploomes %s: %s", deal_id, reason)
+            self._mark_deal_error(deal["Id"], reason)
+            return {
+                "action": "error_registered",
+                "deal_id": str(deal_id),
+                "reason": reason,
             }
 
     def _create_bling_order_from_deal(self, deal: dict[str, Any]) -> dict[str, Any]:
@@ -465,3 +476,19 @@ class DealToBlingOrderSyncService:
 
     def _apply_discount(self, price: float, discount_percent: float) -> float:
         return price - (price * (discount_percent / 100))
+
+    def _describe_bling_http_error(self, exc: httpx.HTTPStatusError) -> str:
+        try:
+            body = exc.response.json()
+        except ValueError:
+            return f"Bling retornou {exc.response.status_code}: {exc.response.text[:300]}"
+
+        error = body.get("error") or {}
+        message = error.get("description") or error.get("message")
+        fields = error.get("fields") or []
+        if fields:
+            field_messages = ", ".join(
+                f"{field.get('element', '?')}: {field.get('msg', '')}" for field in fields
+            )
+            message = f"{message} ({field_messages})" if message else field_messages
+        return message or f"Bling retornou {exc.response.status_code}: {body}"
