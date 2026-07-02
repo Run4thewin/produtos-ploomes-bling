@@ -150,6 +150,52 @@ def list_bling_companies_with_contacts(
         raise HTTPException(status_code=502, detail=f"Erro ao listar empresas: {exc}") from exc
 
 
+@app.get("/bling/nfe", tags=["Bling"])
+def search_nfe(
+    numero: str | None = Query(default=None, description="Número da NF-e"),
+    contact_name: str | None = Query(default=None, description="Nome do contato"),
+    pagina: int = Query(default=1, ge=1),
+    limite: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    """Busca notas fiscais no banco local."""
+    import os, psycopg2, json as _json
+    conn = psycopg2.connect(
+        host=os.environ["DB_HOST"], port=int(os.environ.get("DB_PORT", 5432)),
+        dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"], password=os.environ["DB_PASSWORD"],
+    )
+    conditions = []
+    params: list = []
+    if numero:
+        conditions.append("numero LIKE %s")
+        params.append(f"%{numero}%")
+    if contact_name:
+        conditions.append("contact_name ILIKE %s")
+        params.append(f"%{contact_name}%")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    offset = (pagina - 1) * limite
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, numero, serie, situation, contact_name, total, issue_date, raw_json FROM bling_nfe {where} ORDER BY issue_date DESC LIMIT %s OFFSET %s", params + [limite, offset])
+        rows = cur.fetchall()
+    conn.close()
+    return {
+        "pagina": pagina,
+        "limite": limite,
+        "notas": [{"id": r[0], "numero": r[1], "serie": r[2], "situacao": r[3], "contato": r[4], "total": r[5], "emissao": str(r[6]), "raw_json": r[7]} for r in rows],
+    }
+
+
+@app.get("/bling/nfe/{nfe_id}", tags=["Bling"])
+def get_nfe(nfe_id: int) -> dict[str, Any]:
+    """Retorna uma NF-e pelo ID do Bling."""
+    try:
+        bling = BlingClient(get_settings())
+        r = bling._request("GET", f"nfe/{nfe_id}")
+        bling._raise_bling_error(r)
+        return r.json().get("data", {})
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/bling/contatos/{contact_id}", tags=["Bling"])
 def get_bling_contact(contact_id: int) -> dict[str, Any]:
     """Retorna um contato do Bling pelo ID, incluindo pessoasContato quando for empresa."""

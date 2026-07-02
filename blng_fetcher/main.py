@@ -339,15 +339,51 @@ def upsert_contas_receber(conn, contas: list[dict]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Upsert: naturezas_operacao
+# ---------------------------------------------------------------------------
+
+def upsert_naturezas(conn, naturezas: list[dict]) -> int:
+    naturezas = _dedup(naturezas)
+    rows = []
+    for n in naturezas:
+        rows.append((
+            n.get("id"),
+            n.get("descricao"),
+            n.get("situacao"),
+            bool(n.get("padrao")),
+            _now(),
+            _now(),
+            json.dumps(n, ensure_ascii=False),
+        ))
+
+    sql = """
+        INSERT INTO bling_naturezas_operacao
+            (id, descricao, situacao, padrao, created_at, updated_at, raw_json)
+        VALUES %s
+        ON CONFLICT (id) DO UPDATE SET
+            descricao  = EXCLUDED.descricao,
+            situacao   = EXCLUDED.situacao,
+            padrao     = EXCLUDED.padrao,
+            updated_at = EXCLUDED.updated_at,
+            raw_json   = EXCLUDED.raw_json
+    """
+    with conn.cursor() as cur:
+        execute_values(cur, sql, rows)
+    conn.commit()
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
 # Fetch + load generic
 # ---------------------------------------------------------------------------
 
 ENTITIES: dict[str, tuple[str, callable]] = {
-    "orders":   ("pedidos/vendas",  upsert_orders),
-    "contacts": ("contatos",        upsert_contacts),
-    "nfe":      ("nfe",             upsert_nfe),
-    "pagar":    ("contas/pagar",    upsert_contas_pagar),
-    "receber":  ("contas/receber",  upsert_contas_receber),
+    "orders":    ("pedidos/vendas",      upsert_orders),
+    "contacts":  ("contatos",            upsert_contacts),
+    "nfe":       ("nfe",                 upsert_nfe),
+    "pagar":     ("contas/pagar",        upsert_contas_pagar),
+    "receber":   ("contas/receber",      upsert_contas_receber),
+    "naturezas": ("naturezas-operacoes", upsert_naturezas),
 }
 
 
@@ -355,6 +391,16 @@ def _fetch_page(bling: BlingClient, endpoint: str, page: int, page_size: int) ->
     response = bling._request("GET", endpoint, params={"pagina": page, "limite": page_size})
     bling._raise_bling_error(response)
     return response.json().get("data", [])
+
+
+def _fetch_nfe_detail(bling: BlingClient, nfe_id: int | str) -> dict | None:
+    try:
+        response = bling._request("GET", f"nfe/{nfe_id}")
+        bling._raise_bling_error(response)
+        return response.json().get("data")
+    except Exception as exc:
+        logger.warning("Falha ao buscar detalhe da NF-e %s: %s", nfe_id, exc)
+        return None
 
 
 def _load_entity(
@@ -373,6 +419,15 @@ def _load_entity(
         if not items:
             logger.info("[%s] Sem mais registros na pagina %s.", entity_name, page)
             break
+
+        if entity_name == "nfe":
+            enriched = []
+            for item in items:
+                nfe_id = item.get("id")
+                detail = _fetch_nfe_detail(bling, nfe_id)
+                enriched.append(detail if detail else item)
+            items = enriched
+
         inserted = upsert_fn(conn, items)
         total += inserted
         logger.info("[%s]   -> %s registros (total=%s)", entity_name, inserted, total)
@@ -380,6 +435,73 @@ def _load_entity(
             logger.info("[%s] Ultima pagina atingida.", entity_name)
             break
     return total
+
+
+# ---------------------------------------------------------------------------
+# Backfill: busca detalhe /nfe/{id} para cada registro já no banco
+# ---------------------------------------------------------------------------
+
+def _load_nfe_details(bling: BlingClient, conn, batch_size: int = 50) -> int:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id FROM bling_nfe
+            WHERE raw_json::jsonb ->> 'xml' IS NULL
+            ORDER BY id
+        """)
+        ids = [row[0] for row in cur.fetchall()]
+
+    total = len(ids)
+    logger.info("[nfe-detail] %s notas encontradas no banco.", total)
+
+    updated = 0
+    for i, nfe_id in enumerate(ids, 1):
+        detail = _fetch_nfe_detail(bling, nfe_id)
+        if not detail:
+            logger.warning("[nfe-detail] Sem detalhe para id=%s, pulando.", nfe_id)
+            continue
+
+        contato = detail.get("contato") or {}
+        total_val = detail.get("valorNota")
+        if total_val is None:
+            itens = detail.get("itens") or []
+            total_val = sum(it.get("valorTotal", 0) for it in itens) or None
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bling_nfe SET
+                    numero       = %s,
+                    serie        = %s,
+                    situation    = %s,
+                    contact_id   = %s,
+                    contact_name = %s,
+                    total        = %s,
+                    issue_date   = %s,
+                    updated_at   = %s,
+                    raw_json     = %s
+                WHERE id = %s
+                """,
+                (
+                    str(detail.get("numero", "")),
+                    str(detail["serie"]) if detail.get("serie") is not None else None,
+                    str(detail.get("situacao", "")),
+                    contato.get("id"),
+                    contato.get("nome"),
+                    float(total_val) if total_val is not None else None,
+                    _parse_date(detail.get("dataEmissao")),
+                    _now(),
+                    json.dumps(detail, ensure_ascii=False),
+                    nfe_id,
+                ),
+            )
+
+        if i % batch_size == 0:
+            conn.commit()
+            logger.info("[nfe-detail] %s/%s processadas...", i, total)
+
+    conn.commit()
+    logger.info("[nfe-detail] Concluido. %s notas atualizadas.", updated)
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +518,13 @@ def main(entity: str = "orders", max_pages: int = 1, page_size: int = 100):
     conn = get_db_conn()
     logger.info("Conectado ao banco %s@%s", os.environ["DB_NAME"], os.environ["DB_HOST"])
 
+    if entity == "nfe-detail":
+        try:
+            _load_nfe_details(bling, conn)
+        finally:
+            conn.close()
+        return
+
     targets = list(ENTITIES.items()) if entity == "all" else [(entity, ENTITIES[entity])]
 
     try:
@@ -410,8 +539,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch Bling entities to PostgreSQL")
     parser.add_argument(
         "--entity", default="orders",
-        choices=["all", "orders", "contacts", "nfe", "pagar", "receber"],
-        help="Entidade a buscar (default: orders)",
+        choices=["all", "orders", "contacts", "nfe", "nfe-detail", "pagar", "receber", "naturezas"],
+        help="Entidade a buscar (default: orders). Use nfe-detail para enriquecer NFs já no banco.",
     )
     parser.add_argument("--pages", type=int, default=1, help="Max de paginas (default: 1)")
     parser.add_argument("--page-size", type=int, default=100, help="Registros por pagina (default: 100)")
