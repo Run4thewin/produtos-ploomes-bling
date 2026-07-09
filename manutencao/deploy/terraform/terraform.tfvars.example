@@ -1,0 +1,11 @@
+project_id = "meu-projeto-gcp"
+region     = "us-central1"
+
+# Imagem publicada no Artifact Registry (veja o passo de build no README).
+image = "us-central1-docker.pkg.dev/meu-projeto-gcp/manutencao/api:latest"
+
+# Opcionais
+service_name          = "manutencao-api"
+db_tier               = "db-f1-micro"
+allow_unauthenticated = true
+seed_on_start         = true
