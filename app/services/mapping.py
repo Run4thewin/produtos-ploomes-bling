@@ -33,10 +33,16 @@ def extract_bling_fields(bling_product: dict) -> dict[str, Any]:
     }
 
 
+# O campo Name do Ploomes rejeita (HTTP 400) acima de ~200 chars. Alguns produtos
+# no Bling tem descricaoCurta gigante (texto colado por engano) -> truncamos.
+PLOOMES_NAME_MAX_LENGTH = 200
+
+
 def build_product_name(fabricante: str, partnumber: str, breve_descricao: str) -> str:
     parts = [fabricante, partnumber, breve_descricao]
     name = " ".join(part for part in parts if part)
-    return re.sub(r"\s+", " ", name).strip()
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:PLOOMES_NAME_MAX_LENGTH].strip()
 
 
 def build_optional_details(fields: dict[str, Any]) -> str:
@@ -103,8 +109,6 @@ def build_other_properties(fields: dict[str, Any], settings: Settings) -> list[d
 
 def validate_required_fields(fields: dict[str, Any], bling_product: dict) -> None:
     missing = []
-    if not fields["fabricante"]:
-        missing.append("fabricante (marca)")
     if not fields["partnumber"]:
         missing.append("partnumber (codigo)")
     if not fields["breve_descricao"]:

@@ -41,7 +41,10 @@ class BlingRateLimitTest(unittest.TestCase):
             json={"data": {"id": 12345}},
             request=request,
         )
-        client = BlingClient(Settings(), token_store=FakeTokenStore())
+        client = BlingClient(
+            Settings(bling_min_request_interval_seconds=0),
+            token_store=FakeTokenStore(),
+        )
 
         with (
             patch("app.clients.bling.httpx.request", side_effect=[rate_limited, success]) as request_mock,

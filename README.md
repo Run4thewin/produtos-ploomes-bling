@@ -143,7 +143,7 @@ Produto no Bling que **não existe** no Ploomes → **criado** automaticamente.
 
 | Bling | Ploomes | Obrigatório |
 |---|---|---|
-| `marca` | `Name` + campo Fabricante | Sim |
+| `marca` | `Name` + campo Fabricante | Nao |
 | `codigo` | `Code` + campo Partnumber | Sim |
 | `descricaoCurta` | `Name` | Sim |
 | `preco` | `UnitPrice` | Sim |
@@ -203,5 +203,6 @@ Para evitar duplicidade, o servico verifica o campo `PLOOMES_DEAL_ORDER_FIELD` a
 - **Cloud Tasks** é obrigatório em produção: o webhook responde em <5s e o processamento ocorre de forma assíncrona.
 - **Deal → Pedido Bling** processa direto no webhook, sem Cloud Tasks, conforme decisao de manter esse fluxo mais simples.
 - **Tokens Bling** são persistidos no GCS; a cada refresh o arquivo é atualizado automaticamente.
+- **Cota diária Bling**: a API v3 permite ~120.000 requisições/dia. O `BlingClient` respeita um orçamento diário (`BLING_DAILY_REQUEST_BUDGET`, padrão 100.000) persistido em `.bling_quota.json` (ou no GCS em produção), resetado à meia-noite (UTC). Ao atingir o limite, o `blng_fetcher` **para de forma limpa e salva o progresso**. Como o backfill (`--entity nfe-detail`) e as listagens pulam registros já gravados, basta **reexecutar no dia seguinte** para continuar. Ex.: 240 mil itens que exigem 1 requisição de detalhe cada levam ~3 dias sob o orçamento de 100 mil/dia — não há endpoint de detalhe em lote no Bling, então dividir por dias é a única forma de não estourar a cota.
 - **Exclusão no Bling** inativa o produto no Ploomes (`Suspended=true`), não apaga.
 - Amplie `app/services/mapping.py` e `diff_fields` conforme novos campos forem necessários.

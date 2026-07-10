@@ -5,14 +5,16 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from app.clients.rate_limit import DailyQuota, get_api_rate_limiter, retry_after_delay
+from app.clients.quota_store import build_quota_store
 from app.clients.token_store import TokenStore, build_token_store
 from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
 TOKEN_REFRESH_SKEW = timedelta(minutes=5)
-RATE_LIMIT_RETRY_DELAYS = (2.0, 5.0)
-MAX_RETRY_AFTER_SECONDS = 15.0
+RATE_LIMIT_RETRY_DELAYS = (2.0, 5.0, 10.0, 20.0, 30.0)
+MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 def build_bling_oauth_headers(client_id: str, client_secret: str) -> dict[str, str]:
@@ -36,6 +38,22 @@ class BlingClient:
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._expires_at = datetime.min
+        self._rate_limiter = get_api_rate_limiter(
+            "Bling",
+            self.settings.bling_min_request_interval_seconds,
+        )
+        if self.settings.bling_daily_request_budget > 0:
+            quota_store = build_quota_store(
+                self.settings.bling_quota_path,
+                self.settings.gcs_bucket,
+            )
+            self._rate_limiter.set_daily_quota(
+                DailyQuota(
+                    "Bling",
+                    self.settings.bling_daily_request_budget,
+                    quota_store,
+                )
+            )
 
     def _auth_headers(self) -> dict[str, str]:
         token = self.get_access_token()
@@ -59,6 +77,7 @@ class BlingClient:
         attempt = 1
 
         while True:
+            self._rate_limiter.wait()
             started = time.monotonic()
             response = httpx.request(
                 method,
@@ -94,22 +113,18 @@ class BlingClient:
                     delay,
                     rate_limit_retries + 1,
                 )
-                time.sleep(delay)
+                self._rate_limiter.wait_after_429(delay)
                 attempt += 1
                 continue
 
             return response
 
     def _rate_limit_delay(self, response: httpx.Response, retry_index: int) -> float:
-        retry_after = response.headers.get("Retry-After")
-        if retry_after:
-            try:
-                delay = float(retry_after)
-            except ValueError:
-                delay = RATE_LIMIT_RETRY_DELAYS[retry_index]
-            else:
-                return min(max(delay, 0.0), MAX_RETRY_AFTER_SECONDS)
-        return RATE_LIMIT_RETRY_DELAYS[retry_index]
+        return retry_after_delay(
+            response,
+            RATE_LIMIT_RETRY_DELAYS[retry_index],
+            max_delay=MAX_RETRY_AFTER_SECONDS,
+        )
 
     def get_access_token(self) -> str:
         if self._has_valid_access_token():
@@ -173,19 +188,37 @@ class BlingClient:
         return self._access_token
 
     def _refresh_access_token(self, refresh_token: str) -> dict:
-        response = httpx.post(
-            "https://www.bling.com.br/Api/v3/oauth/token",
-            headers=build_bling_oauth_headers(
-                self.settings.bling_client_id,
-                self.settings.bling_client_secret,
-            ),
-            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-            timeout=self.settings.http_timeout_seconds,
-        )
-        logger.info("Bling OAuth HTTP | status=%s", response.status_code)
-        response.raise_for_status()
-        logger.info("Access token Bling renovado")
-        return response.json()
+        rate_limit_retries = 0
+        attempt = 1
+
+        while True:
+            self._rate_limiter.wait()
+            response = httpx.post(
+                "https://www.bling.com.br/Api/v3/oauth/token",
+                headers=build_bling_oauth_headers(
+                    self.settings.bling_client_id,
+                    self.settings.bling_client_secret,
+                ),
+                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                timeout=self.settings.http_timeout_seconds,
+            )
+            logger.info("Bling OAuth HTTP | status=%s attempt=%s", response.status_code, attempt)
+
+            if response.status_code == 429 and rate_limit_retries < len(RATE_LIMIT_RETRY_DELAYS):
+                delay = self._rate_limit_delay(response, rate_limit_retries)
+                rate_limit_retries += 1
+                logger.warning(
+                    "Bling OAuth retornou 429; aguardando %.1fs antes da tentativa %s",
+                    delay,
+                    rate_limit_retries + 1,
+                )
+                self._rate_limiter.wait_after_429(delay)
+                attempt += 1
+                continue
+
+            response.raise_for_status()
+            logger.info("Access token Bling renovado")
+            return response.json()
 
     def _raise_bling_error(self, response: httpx.Response) -> None:
         if response.status_code == 401:

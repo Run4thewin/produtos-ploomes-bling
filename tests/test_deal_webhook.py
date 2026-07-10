@@ -6,9 +6,10 @@ from app.services.sync_deal_to_bling_order import DealToBlingOrderSyncService
 
 
 class FakePloomesClient:
-    def __init__(self, deal: dict, quote: dict | None = None):
+    def __init__(self, deal: dict, quote: dict | None = None, products: dict | None = None):
         self.deal = deal
         self.quote = quote
+        self.products = products or {}
         self.updated_deals: list[tuple[int | str, dict]] = []
 
     def get_deal_by_id(self, deal_id: int | str) -> dict:
@@ -17,14 +18,19 @@ class FakePloomesClient:
     def get_latest_quote_by_deal(self, deal_id: int | str) -> dict | None:
         return self.quote
 
+    def get_product_by_id(self, product_id: int | str) -> dict:
+        return self.products[product_id]
+
     def update_deal(self, deal_id: int | str, payload: dict) -> dict:
         self.updated_deals.append((deal_id, payload))
         return payload
 
 
 class FakeBlingClient:
-    def __init__(self):
+    def __init__(self, bling_products_by_code: dict | None = None):
         self.created_payload: dict | None = None
+        self.created_products: list[dict] = []
+        self.bling_products_by_code = bling_products_by_code or {}
 
     def get_contact_by_document(self, document_number: str | None) -> dict | None:
         contacts = {
@@ -32,6 +38,13 @@ class FakeBlingClient:
             "98765432000111": {"id": 200, "nome": "Transportadora"},
         }
         return contacts.get(document_number or "")
+
+    def get_product_by_code(self, code: str) -> dict | None:
+        return self.bling_products_by_code.get(code)
+
+    def create_product(self, payload: dict) -> dict:
+        self.created_products.append(payload)
+        return {"id": 500 + len(self.created_products), "codigo": payload.get("codigo")}
 
     def create_sales_order(self, payload: dict) -> dict:
         self.created_payload = payload
@@ -91,11 +104,28 @@ def make_quote() -> dict:
         "Id": 77,
         "Products": [
             {
+                "ProductId": 999,
                 "ProductName": "Produto Teste",
                 "Quantity": 2,
                 "UnitPrice": 100,
                 "Discount": 10,
             }
+        ],
+    }
+
+
+def make_ploomes_product(settings: Settings, partnumber: str = "SKU-123") -> dict:
+    fabricante = "ACME"
+    breve_descricao = "Produto Teste"
+    return {
+        "Id": 999,
+        "Name": f"{fabricante} {partnumber} {breve_descricao}",
+        "Code": partnumber,
+        "UnitPrice": 100,
+        "Suspended": False,
+        "OtherProperties": [
+            {"FieldKey": settings.ploomes_field_partnumber, "StringValue": partnumber},
+            {"FieldKey": settings.ploomes_field_fabricante, "StringValue": fabricante},
         ],
     }
 
@@ -112,9 +142,14 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertEqual(parsed["action"], "update")
 
     def test_service_creates_bling_order_and_updates_deal(self):
-        bling = FakeBlingClient()
-        ploomes = FakePloomesClient(make_deal(), make_quote())
-        service = DealToBlingOrderSyncService(make_settings(), bling=bling, ploomes=ploomes)
+        settings = make_settings()
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
+        ploomes = FakePloomesClient(
+            make_deal(),
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
 
         result = service.create_bling_order_from_deal(55)
 
@@ -123,15 +158,19 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertEqual(bling.created_payload["contato"]["id"], 100)
         self.assertEqual(bling.created_payload["vendedor"]["id"], 15596362133)
         self.assertEqual(len(bling.created_payload["parcelas"]), 2)
+        self.assertEqual(bling.created_payload["itens"][0]["produto"]["id"], 700)
+        self.assertEqual(bling.created_products, [])
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110008939)
 
     def test_service_attempts_bling_order_even_with_existing_reference(self):
-        bling = FakeBlingClient()
+        settings = make_settings()
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
         ploomes = FakePloomesClient(
             make_deal("Pedido Bling 9876: https://www.bling.com.br/vendas.php#edit/12345"),
             make_quote(),
+            products={999: make_ploomes_product(settings)},
         )
-        service = DealToBlingOrderSyncService(make_settings(), bling=bling, ploomes=ploomes)
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
 
         result = service.create_bling_order_from_deal(55)
 
@@ -139,6 +178,45 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertEqual(result["bling_order_id"], 12345)
         self.assertIsNotNone(bling.created_payload)
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110008939)
+
+    def test_service_creates_bling_product_when_sku_not_found(self):
+        settings = make_settings()
+        bling = FakeBlingClient(bling_products_by_code={})
+        ploomes = FakePloomesClient(
+            make_deal(),
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        result = service.create_bling_order_from_deal(55)
+
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(len(bling.created_products), 1)
+        self.assertEqual(bling.created_products[0]["codigo"], "SKU-123")
+        self.assertEqual(bling.created_payload["itens"][0]["produto"]["id"], 501)
+
+    def test_service_registers_error_when_product_missing_partnumber(self):
+        settings = make_settings()
+        bling = FakeBlingClient()
+        product_without_partnumber = make_ploomes_product(settings)
+        product_without_partnumber["OtherProperties"] = [
+            item
+            for item in product_without_partnumber["OtherProperties"]
+            if item["FieldKey"] != settings.ploomes_field_partnumber
+        ]
+        ploomes = FakePloomesClient(
+            make_deal(),
+            make_quote(),
+            products={999: product_without_partnumber},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        result = service.create_bling_order_from_deal(55)
+
+        self.assertEqual(result["action"], "error_registered")
+        self.assertIn("partnumber", result["reason"])
+        self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110070771)
 
 
 if __name__ == "__main__":

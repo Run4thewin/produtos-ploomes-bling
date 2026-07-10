@@ -1,5 +1,6 @@
 .env
 tokens.json
+.bling_quota.json
 service_account.json
 client_secret*.json
 relatorios/

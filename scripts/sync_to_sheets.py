@@ -7,6 +7,7 @@ Abas geradas:
     NF-e             → bling_nfe × bling_contacts
     Contas Receber   → bling_contas_receber × bling_contacts
     Contas Pagar     → bling_contas_pagar × bling_contacts
+    Contatos         → bling_contacts
     _log             → histórico de execuções
 
 .env necessário:
@@ -239,6 +240,84 @@ ENTITIES: list[Entity] = [
             ORDER BY cp.due_date DESC NULLS LAST
         """,
     ),
+
+    Entity(
+        key="contatos",
+        tab="Contatos",
+        headers=[
+            "ID Bling", "Código Bling", "Nome", "Nome Fantasia",
+            "Documento", "Tipo Pessoa", "Fornecedor", "Cliente",
+            "Tipos de Contato", "Estrangeiro", "País",
+            "E-mail", "E-mail NF-e", "Telefone", "Celular",
+            "Endereço", "Número", "Complemento", "Bairro", "CEP", "Cidade", "UF",
+            "Endereço Cobrança", "Cidade Cobrança", "UF Cobrança", "CEP Cobrança",
+            "IE", "Indicador IE", "Inscrição Municipal", "RG", "Órgão Emissor",
+            "Órgão Público", "Data Nascimento", "Sexo", "Naturalidade",
+            "Limite Crédito", "Condição Pagamento", "Categoria Financeira",
+            "Vendedor ID", "Qtd Pessoas de Contato",
+            "Situação", "Criado em", "Atualizado em",
+        ],
+        sql="""
+            SELECT
+                c.id::text,
+                c.raw_json ->> 'codigo',
+                c.name,
+                NULLIF(c.raw_json ->> 'fantasia', ''),
+                c.document,
+                c.person_type,
+                c.is_supplier,
+                c.is_client,
+                (
+                    SELECT string_agg(t ->> 'descricao', ', ')
+                    FROM jsonb_array_elements(COALESCE(c.raw_json -> 'tiposContato', '[]'::jsonb)) t
+                ),
+                (c.raw_json ->> 'tipo' = 'E'),
+                NULLIF(c.raw_json -> 'pais' ->> 'nome', ''),
+                c.email,
+                NULLIF(c.raw_json ->> 'emailNotaFiscal', ''),
+                c.phone,
+                NULLIF(c.raw_json ->> 'celular', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'geral' ->> 'endereco', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'geral' ->> 'numero', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'geral' ->> 'complemento', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'geral' ->> 'bairro', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'geral' ->> 'cep', ''),
+                c.city,
+                c.state,
+                NULLIF(c.raw_json -> 'endereco' -> 'cobranca' ->> 'endereco', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'cobranca' ->> 'municipio', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'cobranca' ->> 'uf', ''),
+                NULLIF(c.raw_json -> 'endereco' -> 'cobranca' ->> 'cep', ''),
+                NULLIF(c.raw_json ->> 'ie', ''),
+                CASE c.raw_json ->> 'indicadorIe'
+                    WHEN '1' THEN 'Contribuinte ICMS'
+                    WHEN '2' THEN 'Contribuinte isento'
+                    WHEN '9' THEN 'Não contribuinte'
+                    ELSE NULLIF(c.raw_json ->> 'indicadorIe', '')
+                END,
+                NULLIF(c.raw_json ->> 'inscricaoMunicipal', ''),
+                NULLIF(c.raw_json ->> 'rg', ''),
+                NULLIF(c.raw_json ->> 'orgaoEmissor', ''),
+                NULLIF(c.raw_json ->> 'orgaoPublico', ''),
+                NULLIF(c.raw_json -> 'dadosAdicionais' ->> 'dataNascimento', '0000-00-00'),
+                NULLIF(c.raw_json -> 'dadosAdicionais' ->> 'sexo', ''),
+                NULLIF(c.raw_json -> 'dadosAdicionais' ->> 'naturalidade', ''),
+                NULLIF((c.raw_json -> 'financeiro' ->> 'limiteCredito')::numeric, 0),
+                NULLIF(c.raw_json -> 'financeiro' ->> 'condicaoPagamento', ''),
+                NULLIF((c.raw_json -> 'financeiro' -> 'categoria' ->> 'id')::text, '0'),
+                NULLIF((c.raw_json -> 'vendedor' ->> 'id')::text, '0'),
+                jsonb_array_length(COALESCE(c.raw_json -> 'pessoasContato', '[]'::jsonb)),
+                CASE c.raw_json ->> 'situacao'
+                    WHEN 'A' THEN 'Ativo'
+                    WHEN 'I' THEN 'Inativo'
+                    ELSE c.raw_json ->> 'situacao'
+                END,
+                c.created_at,
+                c.updated_at
+            FROM bling_contacts c
+            ORDER BY c.name
+        """,
+    ),
 ]
 
 ENTITY_MAP = {e.key: e for e in ENTITIES}
@@ -427,7 +506,7 @@ if __name__ == "__main__":
         "--entity",
         choices=list(ENTITY_MAP.keys()) + ["all"],
         default="all",
-        help="Entidade a sincronizar: all | pedidos | nfe | receber | pagar (default: all)",
+        help="Entidade a sincronizar: all | pedidos | nfe | receber | pagar | contatos (default: all)",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

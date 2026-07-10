@@ -7,16 +7,18 @@ Uso:
     python -m blng_fetcher.main --entity all --pages 999 # todas entidades
     python -m blng_fetcher.main --entity contacts --pages 5
 
-Entidades: all | orders | contacts | nfe | pagar | receber
+Entidades: all | orders | contacts | nfe | pagar | receber | naturezas | produtos
 """
 import argparse
 import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, date, timezone
 from pathlib import Path
 
+import httpx
 import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
@@ -27,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 from app.clients.bling import BlingClient  # noqa: E402
+from app.clients.rate_limit import DailyQuotaExceeded  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -152,14 +155,26 @@ def upsert_contacts(conn, contacts: list[dict]) -> int:
     rows = []
     for c in contacts:
         phone = c.get("telefone") or c.get("celular")
-        endereco = c.get("endereco") or {}
+        # endereco/financeiro/dadosAdicionais/tiposContato so vem no detalhe
+        # (/contatos/{id}); a listagem nao traz esses campos.
+        endereco = (c.get("endereco") or {}).get("geral") or {}
+        cobranca = (c.get("endereco") or {}).get("cobranca") or {}
+        financeiro = c.get("financeiro") or {}
+        dados_adic = c.get("dadosAdicionais") or {}
+        tipos_contato_list = c.get("tiposContato") or []
+        tipos_contato = {(t.get("descricao") or "").strip().lower() for t in tipos_contato_list}
+        indicador_ie = str(c.get("indicadorIe") or "")
+        indicador_ie_label = {
+            "1": "Contribuinte ICMS", "2": "Contribuinte isento", "9": "Nao contribuinte",
+        }.get(indicador_ie, indicador_ie or None)
+
         rows.append((
             c.get("id"),
             c.get("nome"),
             c.get("numeroDocumento"),
             c.get("tipo"),
-            c.get("fornecedor"),
-            c.get("cliente"),
+            "fornecedor" in tipos_contato,
+            "cliente" in tipos_contato,
             c.get("email"),
             phone,
             endereco.get("municipio"),
@@ -167,25 +182,92 @@ def upsert_contacts(conn, contacts: list[dict]) -> int:
             _parse_dt(c.get("dataCriacao")),
             _now(),
             json.dumps(c, ensure_ascii=False),
+            c.get("codigo") or None,
+            c.get("fantasia") or None,
+            ", ".join(t.get("descricao") for t in tipos_contato_list if t.get("descricao")) or None,
+            (c.get("pais") or {}).get("nome") or None,
+            c.get("tipo") == "E",
+            c.get("emailNotaFiscal") or None,
+            c.get("celular") or None,
+            endereco.get("endereco") or None,
+            endereco.get("numero") or None,
+            endereco.get("complemento") or None,
+            endereco.get("bairro") or None,
+            endereco.get("cep") or None,
+            cobranca.get("endereco") or None,
+            cobranca.get("municipio") or None,
+            cobranca.get("uf") or None,
+            cobranca.get("cep") or None,
+            c.get("ie") or None,
+            indicador_ie_label,
+            c.get("inscricaoMunicipal") or None,
+            c.get("rg") or None,
+            c.get("orgaoEmissor") or None,
+            c.get("orgaoPublico") or None,
+            _parse_date(dados_adic.get("dataNascimento")),
+            dados_adic.get("sexo") or None,
+            dados_adic.get("naturalidade") or None,
+            (financeiro.get("limiteCredito") or None),
+            financeiro.get("condicaoPagamento") or None,
+            str((financeiro.get("categoria") or {}).get("id") or "") or None,
+            str((c.get("vendedor") or {}).get("id") or "") or None,
+            len(c.get("pessoasContato") or []),
         ))
 
     sql = """
         INSERT INTO bling_contacts
             (id, name, document, person_type, is_supplier, is_client,
-             email, phone, city, state, created_at, updated_at, raw_json)
+             email, phone, city, state, created_at, updated_at, raw_json,
+             internal_code, trade_name, contact_types, country, is_foreign,
+             email_nfe, cell_phone, street, street_number, complement,
+             neighborhood, zip_code, billing_street, billing_city, billing_state,
+             billing_zip_code, state_registration, state_registration_status,
+             municipal_registration, rg, issuing_agency, public_agency,
+             birth_date, gender, place_of_birth, credit_limit, payment_terms,
+             financial_category_id, seller_id, contact_persons_count)
         VALUES %s
         ON CONFLICT (id) DO UPDATE SET
-            name         = EXCLUDED.name,
-            document     = EXCLUDED.document,
-            person_type  = EXCLUDED.person_type,
-            is_supplier  = EXCLUDED.is_supplier,
-            is_client    = EXCLUDED.is_client,
-            email        = EXCLUDED.email,
-            phone        = EXCLUDED.phone,
-            city         = EXCLUDED.city,
-            state        = EXCLUDED.state,
-            updated_at   = EXCLUDED.updated_at,
-            raw_json     = EXCLUDED.raw_json
+            name                       = EXCLUDED.name,
+            document                   = EXCLUDED.document,
+            person_type                = EXCLUDED.person_type,
+            is_supplier                = EXCLUDED.is_supplier,
+            is_client                  = EXCLUDED.is_client,
+            email                      = EXCLUDED.email,
+            phone                      = EXCLUDED.phone,
+            city                       = EXCLUDED.city,
+            state                      = EXCLUDED.state,
+            updated_at                 = EXCLUDED.updated_at,
+            raw_json                   = EXCLUDED.raw_json,
+            internal_code              = EXCLUDED.internal_code,
+            trade_name                 = EXCLUDED.trade_name,
+            contact_types              = EXCLUDED.contact_types,
+            country                    = EXCLUDED.country,
+            is_foreign                 = EXCLUDED.is_foreign,
+            email_nfe                  = EXCLUDED.email_nfe,
+            cell_phone                 = EXCLUDED.cell_phone,
+            street                     = EXCLUDED.street,
+            street_number              = EXCLUDED.street_number,
+            complement                 = EXCLUDED.complement,
+            neighborhood               = EXCLUDED.neighborhood,
+            zip_code                   = EXCLUDED.zip_code,
+            billing_street             = EXCLUDED.billing_street,
+            billing_city               = EXCLUDED.billing_city,
+            billing_state              = EXCLUDED.billing_state,
+            billing_zip_code           = EXCLUDED.billing_zip_code,
+            state_registration         = EXCLUDED.state_registration,
+            state_registration_status  = EXCLUDED.state_registration_status,
+            municipal_registration     = EXCLUDED.municipal_registration,
+            rg                         = EXCLUDED.rg,
+            issuing_agency             = EXCLUDED.issuing_agency,
+            public_agency              = EXCLUDED.public_agency,
+            birth_date                 = EXCLUDED.birth_date,
+            gender                     = EXCLUDED.gender,
+            place_of_birth             = EXCLUDED.place_of_birth,
+            credit_limit               = EXCLUDED.credit_limit,
+            payment_terms              = EXCLUDED.payment_terms,
+            financial_category_id      = EXCLUDED.financial_category_id,
+            seller_id                  = EXCLUDED.seller_id,
+            contact_persons_count      = EXCLUDED.contact_persons_count
     """
     with conn.cursor() as cur:
         execute_values(cur, sql, rows)
@@ -374,6 +456,67 @@ def upsert_naturezas(conn, naturezas: list[dict]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Upsert: produtos
+# ---------------------------------------------------------------------------
+
+def upsert_produtos(conn, produtos: list[dict]) -> int:
+    produtos = _dedup(produtos)
+    rows = []
+    for p in produtos:
+        tributacao = p.get("tributacao") or {}
+        dimensoes = p.get("dimensoes") or {}
+        rows.append((
+            p.get("id"),
+            p.get("codigo"),
+            p.get("nome"),
+            p.get("descricaoCurta"),
+            float(p.get("preco", 0) or 0),
+            p.get("situacao"),
+            p.get("tipo"),
+            p.get("formato"),
+            p.get("marca"),
+            tributacao.get("ncm"),
+            p.get("pesoLiquido"),
+            p.get("pesoBruto"),
+            dimensoes.get("largura"),
+            dimensoes.get("altura"),
+            dimensoes.get("profundidade"),
+            _now(),
+            _now(),
+            json.dumps(p, ensure_ascii=False),
+        ))
+
+    sql = """
+        INSERT INTO bling_produtos
+            (id, codigo, nome, descricao_curta, preco, situacao, tipo, formato,
+             marca, ncm, peso_liquido, peso_bruto, largura, altura, profundidade,
+             created_at, updated_at, raw_json)
+        VALUES %s
+        ON CONFLICT (id) DO UPDATE SET
+            codigo          = EXCLUDED.codigo,
+            nome            = EXCLUDED.nome,
+            descricao_curta = EXCLUDED.descricao_curta,
+            preco           = EXCLUDED.preco,
+            situacao        = EXCLUDED.situacao,
+            tipo            = EXCLUDED.tipo,
+            formato         = EXCLUDED.formato,
+            marca           = EXCLUDED.marca,
+            ncm             = EXCLUDED.ncm,
+            peso_liquido    = EXCLUDED.peso_liquido,
+            peso_bruto      = EXCLUDED.peso_bruto,
+            largura         = EXCLUDED.largura,
+            altura          = EXCLUDED.altura,
+            profundidade    = EXCLUDED.profundidade,
+            updated_at      = EXCLUDED.updated_at,
+            raw_json        = EXCLUDED.raw_json
+    """
+    with conn.cursor() as cur:
+        execute_values(cur, sql, rows)
+    conn.commit()
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
 # Fetch + load generic
 # ---------------------------------------------------------------------------
 
@@ -384,13 +527,33 @@ ENTITIES: dict[str, tuple[str, callable]] = {
     "pagar":     ("contas/pagar",        upsert_contas_pagar),
     "receber":   ("contas/receber",      upsert_contas_receber),
     "naturezas": ("naturezas-operacoes", upsert_naturezas),
+    "produtos":  ("produtos",            upsert_produtos),
 }
 
 
+FETCH_PAGE_TRANSIENT_STATUS = {502, 503, 504}
+FETCH_PAGE_RETRY_DELAYS = (2.0, 5.0, 10.0)
+
+
 def _fetch_page(bling: BlingClient, endpoint: str, page: int, page_size: int) -> list[dict]:
-    response = bling._request("GET", endpoint, params={"pagina": page, "limite": page_size})
-    bling._raise_bling_error(response)
-    return response.json().get("data", [])
+    last_error: httpx.HTTPStatusError | None = None
+    for attempt, delay in enumerate((0.0, *FETCH_PAGE_RETRY_DELAYS)):
+        if delay:
+            logger.warning(
+                "Erro transitorio ao buscar pagina %s de %s; tentando de novo em %.0fs...",
+                page, endpoint, delay,
+            )
+            time.sleep(delay)
+        response = bling._request("GET", endpoint, params={"pagina": page, "limite": page_size})
+        if response.status_code in FETCH_PAGE_TRANSIENT_STATUS:
+            try:
+                bling._raise_bling_error(response)
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                continue
+        bling._raise_bling_error(response)
+        return response.json().get("data", [])
+    raise last_error
 
 
 def _fetch_nfe_detail(bling: BlingClient, nfe_id: int | str) -> dict | None:
@@ -398,8 +561,22 @@ def _fetch_nfe_detail(bling: BlingClient, nfe_id: int | str) -> dict | None:
         response = bling._request("GET", f"nfe/{nfe_id}")
         bling._raise_bling_error(response)
         return response.json().get("data")
+    except DailyQuotaExceeded:
+        raise
     except Exception as exc:
         logger.warning("Falha ao buscar detalhe da NF-e %s: %s", nfe_id, exc)
+        return None
+
+
+def _fetch_contact_detail(bling: BlingClient, contact_id: int | str) -> dict | None:
+    # A listagem /contatos nao traz tipo/tiposContato/endereco/email; so o
+    # detalhe (/contatos/{id}) tem esses campos, necessarios p/ is_supplier/is_client.
+    try:
+        return bling.get_contact(contact_id)
+    except DailyQuotaExceeded:
+        raise
+    except Exception as exc:
+        logger.warning("Falha ao buscar detalhe do contato %s: %s", contact_id, exc)
         return None
 
 
@@ -411,22 +588,38 @@ def _load_entity(
     entity_name: str,
     max_pages: int,
     page_size: int,
+    start_page: int = 1,
 ) -> int:
     total = 0
-    for page in range(1, max_pages + 1):
+    for page in range(start_page, start_page + max_pages):
         logger.info("[%s] Buscando pagina %s...", entity_name, page)
-        items = _fetch_page(bling, endpoint, page, page_size)
+        try:
+            items = _fetch_page(bling, endpoint, page, page_size)
+
+            if entity_name == "nfe":
+                enriched = []
+                for item in items:
+                    nfe_id = item.get("id")
+                    detail = _fetch_nfe_detail(bling, nfe_id)
+                    enriched.append(detail if detail else item)
+                items = enriched
+            elif entity_name == "contacts":
+                enriched = []
+                for item in items:
+                    detail = _fetch_contact_detail(bling, item.get("id"))
+                    enriched.append(detail if detail else item)
+                items = enriched
+        except DailyQuotaExceeded as exc:
+            logger.warning(
+                "[%s] %s. Parando na pagina %s (total ja gravado=%s). "
+                "Reexecute amanha para continuar.",
+                entity_name, exc, page, total,
+            )
+            break
+
         if not items:
             logger.info("[%s] Sem mais registros na pagina %s.", entity_name, page)
             break
-
-        if entity_name == "nfe":
-            enriched = []
-            for item in items:
-                nfe_id = item.get("id")
-                detail = _fetch_nfe_detail(bling, nfe_id)
-                enriched.append(detail if detail else item)
-            items = enriched
 
         inserted = upsert_fn(conn, items)
         total += inserted
@@ -455,7 +648,16 @@ def _load_nfe_details(bling: BlingClient, conn, batch_size: int = 50) -> int:
 
     updated = 0
     for i, nfe_id in enumerate(ids, 1):
-        detail = _fetch_nfe_detail(bling, nfe_id)
+        try:
+            detail = _fetch_nfe_detail(bling, nfe_id)
+        except DailyQuotaExceeded as exc:
+            conn.commit()
+            logger.warning(
+                "[nfe-detail] %s. Parando em %s/%s. Reexecute amanha para continuar "
+                "(itens ja atualizados sao pulados automaticamente).",
+                exc, i - 1, total,
+            )
+            return updated
         if not detail:
             logger.warning("[nfe-detail] Sem detalhe para id=%s, pulando.", nfe_id)
             continue
@@ -508,10 +710,10 @@ def _load_nfe_details(bling: BlingClient, conn, batch_size: int = 50) -> int:
 # Main
 # ---------------------------------------------------------------------------
 
-def main(entity: str = "orders", max_pages: int = 1, page_size: int = 100):
+def main(entity: str = "orders", max_pages: int = 1, page_size: int = 100, start_page: int = 1):
     logger.info(
-        "Iniciando carga — entity=%s max_pages=%s page_size=%s",
-        entity, max_pages, page_size,
+        "Iniciando carga — entity=%s max_pages=%s page_size=%s start_page=%s",
+        entity, max_pages, page_size, start_page,
     )
 
     bling = BlingClient()
@@ -529,7 +731,7 @@ def main(entity: str = "orders", max_pages: int = 1, page_size: int = 100):
 
     try:
         for name, (endpoint, upsert_fn) in targets:
-            total = _load_entity(bling, conn, endpoint, upsert_fn, name, max_pages, page_size)
+            total = _load_entity(bling, conn, endpoint, upsert_fn, name, max_pages, page_size, start_page)
             logger.info("[%s] Carga concluida. Total: %s registros.", name, total)
     finally:
         conn.close()
@@ -539,10 +741,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch Bling entities to PostgreSQL")
     parser.add_argument(
         "--entity", default="orders",
-        choices=["all", "orders", "contacts", "nfe", "nfe-detail", "pagar", "receber", "naturezas"],
+        choices=["all", "orders", "contacts", "nfe", "nfe-detail", "pagar", "receber", "naturezas", "produtos"],
         help="Entidade a buscar (default: orders). Use nfe-detail para enriquecer NFs já no banco.",
     )
     parser.add_argument("--pages", type=int, default=1, help="Max de paginas (default: 1)")
     parser.add_argument("--page-size", type=int, default=100, help="Registros por pagina (default: 100)")
+    parser.add_argument(
+        "--start-page", type=int, default=1,
+        help="Pagina inicial (default: 1). Use para retomar uma carga interrompida.",
+    )
     args = parser.parse_args()
-    main(entity=args.entity, max_pages=args.pages, page_size=args.page_size)
+    main(entity=args.entity, max_pages=args.pages, page_size=args.page_size, start_page=args.start_page)

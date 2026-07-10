@@ -9,6 +9,7 @@ import httpx
 from app.clients.bling import BlingClient
 from app.clients.ploomes import PloomesClient
 from app.config import Settings, get_settings
+from app.services.mapping import ProductMappingError, get_other_property, map_ploomes_to_bling
 
 logger = logging.getLogger(__name__)
 
@@ -270,8 +271,10 @@ class DealToBlingOrderSyncService:
             discount = float(product.get("Discount") or 0)
             quantity_float = float(quantity)
             total += self._apply_discount(unit_price, discount) * quantity_float
+            bling_product = self._resolve_bling_product_for_item(product)
             items.append(
                 {
+                    "produto": {"id": bling_product["id"]},
                     "unidade": "UN",
                     "quantidade": quantity,
                     "desconto": discount,
@@ -289,6 +292,47 @@ class DealToBlingOrderSyncService:
         if not items:
             raise DealOrderValidationError("Quote sem produtos para gerar pedido")
         return items, total
+
+    def _resolve_bling_product_for_item(self, quote_item: dict[str, Any]) -> dict[str, Any]:
+        ploomes_product_id = quote_item.get("ProductId")
+        if not ploomes_product_id:
+            raise DealOrderValidationError(
+                f"Item {quote_item.get('ProductName', '')} sem ProductId do Ploomes"
+            )
+
+        ploomes_product = self.ploomes.get_product_by_id(ploomes_product_id)
+        partnumber = get_other_property(ploomes_product, self.settings.ploomes_field_partnumber)
+        partnumber = str(partnumber).strip() if partnumber else ""
+        if not partnumber:
+            raise DealOrderValidationError(
+                f"Produto Ploomes {ploomes_product_id} sem partnumber (SKU) cadastrado"
+            )
+
+        bling_product = self.bling.get_product_by_code(partnumber)
+        if bling_product:
+            logger.info(
+                "[DEAL_ORDER] Produto vinculado no Bling | ploomes_product_id=%s partnumber=%s bling_product_id=%s",
+                ploomes_product_id,
+                partnumber,
+                bling_product.get("id"),
+            )
+            return bling_product
+
+        try:
+            payload = map_ploomes_to_bling(ploomes_product, self.settings)
+        except ProductMappingError as exc:
+            raise DealOrderValidationError(
+                f"Produto Ploomes {ploomes_product_id} nao pode ser criado no Bling: {exc}"
+            ) from exc
+        payload["codigo"] = partnumber
+        bling_product = self.bling.create_product(payload)
+        logger.info(
+            "[DEAL_ORDER] Produto criado no Bling | ploomes_product_id=%s partnumber=%s bling_product_id=%s",
+            ploomes_product_id,
+            partnumber,
+            bling_product.get("id"),
+        )
+        return bling_product
 
     def _build_transport(
         self,

@@ -90,8 +90,28 @@ class Settings(BaseSettings):
     internal_secret: str = ""
 
     # Sync tuning
+    sync_force_create_ploomes: bool = False
+    sync_update_existing_ploomes: bool = True
+    # No full-sync, mapeia direto da listagem paginada (100/pag) sem GET /produtos/{id}
+    # por item. Reduz ~240k -> ~2.4k requisicoes Bling. Nao preenche marca/NCM/peso/
+    # dimensoes (nao vem na listagem). O webhook individual continua usando o detalhe.
+    sync_skip_product_detail: bool = True
+    # Pre-indexa os Codes ja existentes no Ploomes uma vez (listagem enxuta) e usa
+    # o set em memoria em vez de 1 GET de lookup por produto. Torna a carga/retomada
+    # muito mais barata no lado Ploomes. So pula a busca pontual quando o produto ja
+    # existe e sync_update_existing_ploomes=False (update precisa do Id -> busca pontual).
+    sync_preindex_ploomes_codes: bool = True
+    sync_preindex_page_size: int = 1000
     reconcile_page_size: int = 100
     http_timeout_seconds: float = 30.0
+    bling_min_request_interval_seconds: float = 0.35
+    ploomes_min_request_interval_seconds: float = 0.25
+    # Orcamento diario de requisicoes ao Bling (limite da API v3 = 120.000/dia).
+    # Padrao 100.000 deixa ~20.000 de folga para webhooks/reconcile no mesmo app.
+    # 0 desativa o controle de cota.
+    bling_daily_request_budget: int = 100000
+    # Contador diario persistido (arquivo local; usa gcs_bucket quando definido).
+    bling_quota_path: str = ".bling_quota.json"
     sync_workers: int = 5
     sync_progress_every: int = 25
     sync_log_file: str = ""

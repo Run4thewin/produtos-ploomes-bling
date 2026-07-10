@@ -14,6 +14,26 @@ from app.services.mapping import ProductMappingError, diff_fields, map_bling_to_
 logger = logging.getLogger(__name__)
 
 SYNC_PREFIX = "[SYNC]"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+MAGENTA = "\033[95m"
+
+
+def _paint(color: str, text: str) -> str:
+    return f"{color}{text}{RESET}"
+
+
+def _short(value: Any, limit: int = 140) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
 
 
 class ProductSyncService:
@@ -22,10 +42,20 @@ class ProductSyncService:
         settings: Settings | None = None,
         bling: BlingClient | None = None,
         ploomes: PloomesClient | None = None,
+        known_codes: set[str] | None = None,
+        known_codes_lock: "threading.Lock | None" = None,
     ):
         self.settings = settings or get_settings()
         self.bling = bling or BlingClient(self.settings)
         self.ploomes = ploomes or PloomesClient(self.settings)
+        # Pre-indice de Codes ja existentes no Ploomes (compartilhado entre threads).
+        self._known_codes = known_codes
+        self._known_codes_lock = known_codes_lock or threading.Lock()
+
+    @staticmethod
+    def _norm_code(code: str) -> str:
+        # Ploomes usa collation case-insensitive; normaliza para evitar duplicatas.
+        return (code or "").strip().upper()
 
     def upsert_from_bling_id(self, product_id: int | str, action: str = "updated") -> dict:
         if action == "deleted":
@@ -53,12 +83,26 @@ class ProductSyncService:
         code = (bling_product.get("codigo") or "").strip()
         name = (bling_product.get("descricaoCurta") or bling_product.get("nome") or "").strip()
 
+        logger.info(
+            "\n%s %s\n%s bling_id=%s code=%s marca=%s preco=%s\n%s %s",
+            _paint(BLUE, "========== PRODUTO BLING -> PLOOMES =========="),
+            _paint(BOLD, "ENTRADA"),
+            _paint(CYAN, "BLING"),
+            bling_id,
+            code or "-",
+            bling_product.get("marca") or "-",
+            bling_product.get("preco") or "-",
+            _paint(DIM, "descricao"),
+            _short(name),
+        )
+
         try:
             payload = map_bling_to_ploomes(bling_product, self.settings)
         except ProductMappingError as exc:
             logger.warning(
-                "%s SKIP bling_id=%s code=%s name=%s | motivo=%s",
-                SYNC_PREFIX,
+                "%s %s bling_id=%s code=%s name=%s | motivo=%s",
+                _paint(YELLOW, SYNC_PREFIX),
+                _paint(YELLOW, "SKIP"),
                 bling_id,
                 code or "-",
                 name or "-",
@@ -73,17 +117,79 @@ class ProductSyncService:
             }
 
         code = payload["Code"]
-        existing = self.ploomes.get_product_by_code(code)
+        logger.info(
+            "%s payload pronto | Name=%s | UnitPrice=%s | OtherProperties=%s",
+            _paint(BLUE, "MAP"),
+            _short(payload.get("Name")),
+            payload.get("UnitPrice"),
+            len(payload.get("OtherProperties") or []),
+        )
+
+        if self.settings.sync_force_create_ploomes:
+            existing = None
+            logger.info(
+                "%s MODO FORCAR CRIACAO ATIVADO | Pulando busca por codigo existente no Ploomes",
+                _paint(GREEN, "FORCED"),
+            )
+        elif self._known_codes is not None:
+            code_known = self._norm_code(code) in self._known_codes
+            if code_known and not self.settings.sync_update_existing_ploomes:
+                # Ja existe e nao vamos atualizar: pula sem gastar 1 GET no Ploomes.
+                logger.info(
+                    "%s produto ja existe no Ploomes (indice) | code=%s | ignorando\n",
+                    _paint(YELLOW, SYNC_PREFIX),
+                    code,
+                )
+                return {
+                    "action": "skipped",
+                    "code": code,
+                    "name": payload["Name"],
+                    "reason": "produto ja existe no Ploomes (indice)",
+                    "bling_id": bling_id,
+                }
+            # Nao esta no indice (novo) -> criar. Se estiver e for atualizar,
+            # busca pontual para obter o Id necessario ao PATCH.
+            existing = self.ploomes.get_product_by_code(code) if code_known else None
+        else:
+            logger.info(
+                "%s procurando no Ploomes por Code='%s'",
+                _paint(CYAN, "LOOKUP"),
+                code,
+            )
+            existing = self.ploomes.get_product_by_code(code)
 
         if existing:
+            if not self.settings.sync_update_existing_ploomes:
+                logger.info(
+                    "%s produto JA EXISTE no Ploomes | code=%s | ignorando atualizacao por configuracao\n",
+                    _paint(YELLOW, SYNC_PREFIX),
+                    code,
+                )
+                return {
+                    "action": "skipped",
+                    "code": code,
+                    "name": payload["Name"],
+                    "reason": "produto ja existe no Ploomes",
+                    "bling_id": bling_id,
+                    "ploomes_id": existing.get("Id"),
+                }
+
+            logger.info(
+                "%s produto JA EXISTE no Ploomes | code=%s ploomes_id=%s name_atual=%s",
+                _paint(YELLOW, "UPDATE"),
+                code,
+                existing.get("Id"),
+                _short(existing.get("Name")),
+            )
             result = self.ploomes.update_product(existing["Id"], payload)
             logger.info(
-                "%s UPDATE bling_id=%s code=%s ploomes_id=%s | %s",
-                SYNC_PREFIX,
+                "%s %s bling_id=%s code=%s ploomes_id=%s | %s\n",
+                _paint(YELLOW, SYNC_PREFIX),
+                _paint(YELLOW, "UPDATE OK"),
                 bling_id,
                 code,
                 existing["Id"],
-                payload["Name"],
+                _short(payload["Name"]),
             )
             return {
                 "action": "updated",
@@ -94,15 +200,40 @@ class ProductSyncService:
                 "result": result,
             }
 
-        result = self.ploomes.create_product(payload)
-        ploomes_id = result.get("Id") or result.get("value", {}).get("Id")
         logger.info(
-            "%s CREATE bling_id=%s code=%s ploomes_id=%s | %s",
-            SYNC_PREFIX,
+            "%s nao existe no Ploomes | code=%s | criando agora...",
+            _paint(GREEN, "CREATE"),
+            code,
+        )
+        result = self.ploomes.create_product(payload)
+        
+        if isinstance(result, list):
+            product_data = result[0] if result else {}
+        elif isinstance(result, dict):
+            if "value" in result:
+                val = result["value"]
+                if isinstance(val, list):
+                    product_data = val[0] if val else {}
+                else:
+                    product_data = val or {}
+            else:
+                product_data = result
+        else:
+            product_data = {}
+
+        if self._known_codes is not None:
+            with self._known_codes_lock:
+                self._known_codes.add(self._norm_code(code))
+
+        ploomes_id = product_data.get("Id")
+        logger.info(
+            "%s %s bling_id=%s code=%s ploomes_id=%s | %s\n",
+            _paint(GREEN, SYNC_PREFIX),
+            _paint(GREEN, "CREATE OK"),
             bling_id,
             code,
             ploomes_id or "-",
-            payload["Name"],
+            _short(payload["Name"]),
         )
         return {
             "action": "created",
@@ -148,12 +279,18 @@ class ProductSyncService:
         max_products = limit if limit and limit > 0 else None
 
         logger.info(
-            "%s INICIO full-sync | workers=%s page_size=%s limit=%s",
-            SYNC_PREFIX,
+            "\n%s\n%s workers=%s page_size=%s limit=%s bling_interval=%ss ploomes_interval=%ss\n",
+            _paint(MAGENTA, "============================================================"),
+            _paint(BOLD + MAGENTA, "[SYNC] INICIO full-sync"),
             workers,
             page_size,
             max_products or "todos",
+            self.settings.bling_min_request_interval_seconds,
+            self.settings.ploomes_min_request_interval_seconds,
         )
+
+        if self.settings.sync_preindex_ploomes_codes and self._known_codes is None:
+            self._known_codes = self._build_ploomes_code_index()
 
         stats: dict[str, int] = {
             "created": 0,
@@ -170,43 +307,51 @@ class ProductSyncService:
 
         batch: list[dict] = []
         products_collected = 0
-        for summary in self.bling.iter_products(page_size):
-            if max_products and products_collected >= max_products:
-                break
+        try:
+            for summary in self.bling.iter_products(page_size):
+                if max_products and products_collected >= max_products:
+                    break
 
-            batch.append(summary)
-            products_collected += 1
+                batch.append(summary)
+                products_collected += 1
 
-            should_process = len(batch) >= page_size or (
-                max_products is not None and products_collected >= max_products
+                should_process = len(batch) >= page_size or (
+                    max_products is not None and products_collected >= max_products
+                )
+                if not should_process:
+                    continue
+
+                page_number += 1
+                self._process_full_sync_batch(
+                    batch=batch,
+                    page_number=page_number,
+                    workers=workers,
+                    stats=stats,
+                    errors_detail=errors_detail,
+                    lock=lock,
+                    processed_before=total_before_batch,
+                )
+                total_before_batch += len(batch)
+                batch = []
+
+            if batch:
+                page_number += 1
+                self._process_full_sync_batch(
+                    batch=batch,
+                    page_number=page_number,
+                    workers=workers,
+                    stats=stats,
+                    errors_detail=errors_detail,
+                    lock=lock,
+                    processed_before=total_before_batch,
+                )
+        except KeyboardInterrupt:
+            logger.warning(
+                "\n%s Sincronizacao cancelada de forma segura pelo usuario (Ctrl+C).",
+                _paint(RED, "[SYNC] INTERROMPIDO"),
             )
-            if not should_process:
-                continue
-
-            page_number += 1
-            self._process_full_sync_batch(
-                batch=batch,
-                page_number=page_number,
-                workers=workers,
-                stats=stats,
-                errors_detail=errors_detail,
-                lock=lock,
-                processed_before=total_before_batch,
-            )
-            total_before_batch += len(batch)
-            batch = []
-
-        if batch:
-            page_number += 1
-            self._process_full_sync_batch(
-                batch=batch,
-                page_number=page_number,
-                workers=workers,
-                stats=stats,
-                errors_detail=errors_detail,
-                lock=lock,
-                processed_before=total_before_batch,
-            )
+            import sys
+            sys.exit(0)
 
         elapsed = round(time.monotonic() - started, 2)
         rate = round(stats["total"] / elapsed, 2) if elapsed > 0 else 0.0
@@ -257,15 +402,17 @@ class ProductSyncService:
     ) -> None:
         batch_size = len(batch)
         logger.info(
-            "%s PAGINA %s iniciada | produtos=%s | workers=%s",
-            SYNC_PREFIX,
+            "\n%s pagina=%s produtos=%s workers=%s",
+            _paint(BLUE, "[SYNC] PAGINA INICIADA"),
             page_number,
             batch_size,
             workers,
         )
         page_started = time.monotonic()
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = {}
+        try:
             futures = {
                 executor.submit(self._sync_single_product, summary): summary for summary in batch
             }
@@ -307,13 +454,14 @@ class ProductSyncService:
 
                 elapsed_item = result.get("elapsed_seconds")
                 if action in {"created", "updated"}:
+                    color = GREEN if action == "created" else YELLOW
                     logger.info(
-                        "%s OK %s/%s pagina=%s | %s bling_id=%s code=%s%s",
-                        SYNC_PREFIX,
+                        "%s %s/%s pagina=%s | %s bling_id=%s code=%s%s",
+                        _paint(color, "[SYNC] OK"),
                         global_index,
                         "?",
                         page_number,
-                        action.upper(),
+                        _paint(color, action.upper()),
                         result.get("bling_id", bling_id),
                         result.get("code") or "-",
                         f" elapsed={elapsed_item}s" if elapsed_item else "",
@@ -334,14 +482,25 @@ class ProductSyncService:
                 if progress_every > 0 and global_index % progress_every == 0:
                     with lock:
                         logger.info(
-                            "%s PROGRESSO total=%s created=%s updated=%s skipped=%s errors=%s",
-                            SYNC_PREFIX,
+                            "%s total=%s created=%s updated=%s skipped=%s errors=%s",
+                            _paint(MAGENTA, "[SYNC] PROGRESSO"),
                             stats["total"],
                             stats["created"],
                             stats["updated"],
                             stats["skipped"],
                             stats["errors"],
                         )
+        except KeyboardInterrupt:
+            logger.warning(
+                "\n%s Interrupcao pelo teclado detectada (Ctrl+C). Cancelando tarefas pendentes...",
+                _paint(RED, "[SYNC] INTERRUPT"),
+            )
+            for f in futures:
+                f.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
         page_elapsed = round(time.monotonic() - page_started, 2)
         logger.info(
@@ -352,14 +511,44 @@ class ProductSyncService:
             page_elapsed,
         )
 
+    def _build_ploomes_code_index(self) -> set[str]:
+        started = time.monotonic()
+        logger.info(
+            "%s pre-indexando Codes existentes no Ploomes (listagem enxuta)...",
+            _paint(MAGENTA, "[SYNC] INDICE"),
+        )
+        codes: set[str] = set()
+        for code in self.ploomes.iter_product_codes(self.settings.sync_preindex_page_size):
+            norm = self._norm_code(code)
+            if norm:
+                codes.add(norm)
+        logger.info(
+            "%s indice pronto | codes=%s elapsed=%ss",
+            _paint(MAGENTA, "[SYNC] INDICE"),
+            len(codes),
+            round(time.monotonic() - started, 2),
+        )
+        return codes
+
     def _sync_single_product(self, summary: dict) -> dict:
         started = time.monotonic()
         bling_id = summary.get("id")
         bling = BlingClient(self.settings)
         ploomes = PloomesClient(self.settings)
-        service = ProductSyncService(self.settings, bling, ploomes)
+        service = ProductSyncService(
+            self.settings,
+            bling,
+            ploomes,
+            known_codes=self._known_codes,
+            known_codes_lock=self._known_codes_lock,
+        )
 
-        product = bling.get_product(bling_id)
+        if self.settings.sync_skip_product_detail:
+            # Mapeia do resumo da listagem: evita 1 GET /produtos/{id} por produto
+            # (o que estourava a cota diaria do Bling com ~240k itens).
+            product = summary
+        else:
+            product = bling.get_product(bling_id)
         result = service.upsert_from_bling_product(product)
         result["elapsed_seconds"] = round(time.monotonic() - started, 2)
         return result
