@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.clients.bling import BlingClient
+from app.clients.db import get_db_conn
 from app.clients.ploomes import PloomesClient
 from app.config import Settings, get_settings
 from app.services.mapping import ProductMappingError, get_other_property, map_ploomes_to_bling
@@ -23,6 +24,19 @@ class StageRule:
     pipeline_id: int
     source_stage_id: int
     target_stage_id: int
+
+
+@dataclass(frozen=True)
+class PurchaseTriggerRule:
+    pipeline_id: int
+    trigger_stage_id: int
+    target_stage_id: int
+
+
+@dataclass(frozen=True)
+class LogisticsRule:
+    pipeline_id: int
+    stage_id: int
 
 
 class DealToBlingOrderSyncService:
@@ -161,6 +175,301 @@ class DealToBlingOrderSyncService:
             "bling_order_id": order_id,
             "bling_order_number": order.get("numero"),
         }
+
+    def create_purchase_flow_from_deal(self, deal_id: int | str) -> dict[str, Any]:
+        logger.info("[PURCHASE_FLOW] INICIO deal_id=%s | buscando Deal no Ploomes", deal_id)
+        deal = self.ploomes.get_deal_by_id(deal_id)
+
+        try:
+            result = self._create_purchase_flow_from_deal(deal)
+            logger.info("[PURCHASE_FLOW] FIM deal_id=%s action=%s", deal_id, result.get("action"))
+            return result
+        except DealOrderValidationError as exc:
+            logger.warning("Deal Ploomes %s nao processado (fluxo compra): %s", deal_id, exc)
+            self._mark_deal_error(deal["Id"], str(exc))
+            return {"action": "error_registered", "deal_id": str(deal_id), "reason": str(exc)}
+        except RuntimeError as exc:
+            logger.warning("Erro operacional no fluxo de compra do Deal Ploomes %s: %s", deal_id, exc)
+            self._mark_deal_error(deal["Id"], str(exc))
+            return {"action": "error_registered", "deal_id": str(deal_id), "reason": str(exc)}
+        except httpx.HTTPStatusError as exc:
+            reason = self._describe_bling_http_error(exc)
+            logger.warning("Erro Bling no fluxo de compra do Deal Ploomes %s: %s", deal_id, reason)
+            self._mark_deal_error(deal["Id"], reason)
+            return {"action": "error_registered", "deal_id": str(deal_id), "reason": reason}
+
+    def _create_purchase_flow_from_deal(self, deal: dict[str, Any]) -> dict[str, Any]:
+        rule = self._find_purchase_trigger_rule(deal)
+        if not rule:
+            return {
+                "action": "skipped",
+                "reason": "stage_nao_configurado",
+                "deal_id": deal.get("Id"),
+                "pipeline_id": deal.get("PipelineId"),
+                "stage_id": deal.get("StageId"),
+            }
+
+        quote = self.ploomes.get_latest_quote_by_deal(deal["Id"])
+        if not quote:
+            raise DealOrderValidationError("Deal sem quote/orcamento para gerar pedido")
+
+        payload = self._build_sales_order_payload(deal, quote)
+        created = self.bling.create_sales_order(payload)
+        sales_order_id = created.get("id")
+        if not sales_order_id:
+            raise RuntimeError(f"Bling criou pedido de venda sem retornar id: {created}")
+        sales_order = self.bling.get_sales_order(sales_order_id)
+
+        purchase_order_id = self._create_linked_purchase_order(payload["itens"], sales_order)
+
+        self._save_order_link(deal["Id"], sales_order_id, purchase_order_id)
+        self._mark_deal_purchase_flow_success(deal, sales_order, purchase_order_id, rule)
+        self._advance_sales_order_situacao(
+            sales_order_id, self.settings.bling_situacao_em_processo_compra
+        )
+
+        logger.info(
+            "[PURCHASE_FLOW] Pedido de venda %s + pedido de compra %s criados a partir do Deal %s",
+            sales_order_id,
+            purchase_order_id,
+            deal.get("Id"),
+        )
+        return {
+            "action": "created",
+            "deal_id": deal.get("Id"),
+            "bling_order_id": sales_order_id,
+            "bling_order_number": sales_order.get("numero"),
+            "bling_purchase_order_id": purchase_order_id,
+        }
+
+    def _create_linked_purchase_order(
+        self, sales_items: list[dict[str, Any]], sales_order: dict[str, Any]
+    ) -> int | None:
+        # Sem fornecedor e sem regra de replicacao de itens confirmada -- payload minimo,
+        # reaproveitando os itens do pedido de venda. Ver plano: "nao precisa ser preenchido
+        # agora" (fornecedor) e "nao aplicar esta regra se nao for necessario" (itens).
+        items = [
+            {
+                "descricao": item.get("descricao"),
+                "unidade": item.get("unidade"),
+                "quantidade": item.get("quantidade"),
+                "valor": item.get("valor"),
+                "produto": item.get("produto"),
+            }
+            for item in sales_items
+        ]
+        payload: dict[str, Any] = {
+            "itens": items,
+            "ordemCompra": f"Pedido de venda {sales_order.get('numero') or sales_order.get('id')}",
+        }
+        try:
+            created = self.bling.create_purchase_order(payload)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "[PURCHASE_FLOW] Falha ao criar pedido de compra vinculado ao pedido de venda %s: %s",
+                sales_order.get("id"),
+                self._describe_bling_http_error(exc),
+            )
+            return None
+        return created.get("id")
+
+    def _advance_sales_order_situacao(self, sales_order_id: int, situacao_id: int) -> None:
+        if not situacao_id:
+            logger.info(
+                "[PURCHASE_FLOW] situacao nao configurada (id=0) | pedido=%s | pulando transicao",
+                sales_order_id,
+            )
+            return
+        try:
+            self.bling.update_sales_order_situacao(sales_order_id, situacao_id)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "[PURCHASE_FLOW] Falha ao mudar situacao do pedido %s para %s: %s",
+                sales_order_id,
+                situacao_id,
+                self._describe_bling_http_error(exc),
+            )
+
+    def _mark_deal_purchase_flow_success(
+        self,
+        deal: dict[str, Any],
+        sales_order: dict[str, Any],
+        purchase_order_id: int | None,
+        rule: PurchaseTriggerRule,
+    ) -> None:
+        order_id = sales_order.get("id")
+        order_number = sales_order.get("numero") or order_id
+        order_reference = (
+            f"Pedido Bling {order_number}: "
+            f"https://www.bling.com.br/vendas.php#edit/{order_id}"
+        )
+        other_properties = [
+            {"FieldKey": self.settings.ploomes_deal_order_field, "StringValue": order_reference},
+        ]
+        if purchase_order_id and self.settings.ploomes_deal_purchase_order_id_field:
+            other_properties.append(
+                {
+                    "FieldKey": self.settings.ploomes_deal_purchase_order_id_field,
+                    "IntegerValue": purchase_order_id,
+                }
+            )
+        self.ploomes.update_deal(
+            deal["Id"],
+            {
+                "StageId": rule.target_stage_id,
+                "OtherProperties": other_properties,
+            },
+        )
+
+    def _save_order_link(
+        self, deal_id: int | str, sales_order_id: int, purchase_order_id: int | None
+    ) -> None:
+        try:
+            conn = get_db_conn(self.settings)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO bling_order_links
+                            (ploomes_deal_id, bling_pedido_venda_id, bling_pedido_compra_id, updated_at)
+                        VALUES (%s, %s, %s, now())
+                        ON CONFLICT (ploomes_deal_id) DO UPDATE SET
+                            bling_pedido_venda_id = EXCLUDED.bling_pedido_venda_id,
+                            bling_pedido_compra_id = EXCLUDED.bling_pedido_compra_id,
+                            updated_at = EXCLUDED.updated_at
+                        """,
+                        (deal_id, sales_order_id, purchase_order_id),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(
+                "[PURCHASE_FLOW] Falha ao gravar bling_order_links | deal_id=%s | %s", deal_id, exc
+            )
+
+    def update_situacao_for_logistics_stage(self, deal_id: int | str) -> dict[str, Any]:
+        deal = self.ploomes.get_deal_by_id(deal_id)
+        rule = self._find_logistics_rule(deal)
+        if not rule:
+            return {
+                "action": "skipped",
+                "reason": "stage_nao_configurado",
+                "deal_id": deal.get("Id"),
+            }
+
+        link = self._get_order_link(deal["Id"])
+        if not link or not link.get("bling_pedido_venda_id"):
+            return {
+                "action": "skipped",
+                "reason": "pedido_nao_vinculado",
+                "deal_id": deal.get("Id"),
+            }
+
+        situacao_id = self.settings.bling_situacao_pronto_faturar
+        if not situacao_id:
+            logger.info(
+                "[LOGISTICS] situacao pronto_faturar nao configurada (id=0) | deal_id=%s | pulando",
+                deal.get("Id"),
+            )
+            return {
+                "action": "skipped",
+                "reason": "situacao_nao_configurada",
+                "deal_id": deal.get("Id"),
+            }
+
+        sales_order_id = link["bling_pedido_venda_id"]
+        try:
+            self.bling.update_sales_order_situacao(sales_order_id, situacao_id)
+        except httpx.HTTPStatusError as exc:
+            reason = self._describe_bling_http_error(exc)
+            logger.warning(
+                "[LOGISTICS] Falha ao mudar situacao do pedido %s: %s", sales_order_id, reason
+            )
+            return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": reason}
+
+        self._update_order_link_situacao(deal["Id"], situacao_id)
+        return {
+            "action": "situacao_atualizada",
+            "deal_id": deal.get("Id"),
+            "bling_order_id": sales_order_id,
+            "situacao_id": situacao_id,
+        }
+
+    def _get_order_link(self, deal_id: int | str) -> dict[str, Any] | None:
+        try:
+            conn = get_db_conn(self.settings)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT bling_pedido_venda_id, bling_pedido_compra_id "
+                        "FROM bling_order_links WHERE ploomes_deal_id = %s",
+                        (deal_id,),
+                    )
+                    row = cur.fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(
+                "[LOGISTICS] Falha ao ler bling_order_links | deal_id=%s | %s", deal_id, exc
+            )
+            return None
+
+        if not row:
+            return None
+        return {"bling_pedido_venda_id": row[0], "bling_pedido_compra_id": row[1]}
+
+    def _update_order_link_situacao(self, deal_id: int | str, situacao_id: int) -> None:
+        try:
+            conn = get_db_conn(self.settings)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bling_order_links SET last_situacao_id = %s, updated_at = now() "
+                        "WHERE ploomes_deal_id = %s",
+                        (situacao_id, deal_id),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(
+                "[LOGISTICS] Falha ao atualizar bling_order_links | deal_id=%s | %s", deal_id, exc
+            )
+
+    def _find_purchase_trigger_rule(self, deal: dict[str, Any]) -> PurchaseTriggerRule | None:
+        pipeline_id = int(deal.get("PipelineId") or 0)
+        stage_id = int(deal.get("StageId") or 0)
+        for rule in self._purchase_trigger_rules():
+            if rule.pipeline_id == pipeline_id and rule.trigger_stage_id == stage_id:
+                return rule
+        return None
+
+    def _purchase_trigger_rules(self) -> list[PurchaseTriggerRule]:
+        rules = []
+        for item in self.settings.ploomes_deal_purchase_trigger_stage_rules.split(","):
+            parts = [part.strip() for part in item.split(":")]
+            if len(parts) != 3 or not all(parts):
+                continue
+            rules.append(PurchaseTriggerRule(*(int(part) for part in parts)))
+        return rules
+
+    def _find_logistics_rule(self, deal: dict[str, Any]) -> LogisticsRule | None:
+        pipeline_id = int(deal.get("PipelineId") or 0)
+        stage_id = int(deal.get("StageId") or 0)
+        for rule in self._logistics_rules():
+            if rule.pipeline_id == pipeline_id and rule.stage_id == stage_id:
+                return rule
+        return None
+
+    def _logistics_rules(self) -> list[LogisticsRule]:
+        rules = []
+        for item in self.settings.ploomes_deal_logistics_stage_rules.split(","):
+            parts = [part.strip() for part in item.split(":")]
+            if len(parts) != 2 or not all(parts):
+                continue
+            rules.append(LogisticsRule(*(int(part) for part in parts)))
+        return rules
 
     def _build_sales_order_payload(self, deal: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
         contact = deal.get("Contact") or {}
@@ -351,6 +660,16 @@ class DealToBlingOrderSyncService:
         if not freight_code:
             raise DealOrderValidationError(f"Tipo de frete nao mapeado: {freight_name}")
 
+        carrier = self._resolve_bling_carrier(deal)
+        # fretePorConta e um inteiro na API do Bling (0=CIF, 1=FOB, 2=Terceiros, 3/4=proprio, 9=sem transporte).
+        transport: dict[str, Any] = {"fretePorConta": int(freight_code)}
+        if carrier:
+            transport["contato"] = {"id": carrier["id"]}
+        if freight_value is not None:
+            transport["frete"] = float(freight_value)
+        return transport
+
+    def _resolve_bling_carrier(self, deal: dict[str, Any]) -> dict[str, Any] | None:
         carrier_document = self._clean_document(
             self._get_property_value(
                 deal,
@@ -359,12 +678,20 @@ class DealToBlingOrderSyncService:
             )
         )
         carrier = self.bling.get_contact_by_document(carrier_document)
-        transport: dict[str, Any] = {"fretePorConta": freight_code}
         if carrier:
-            transport["contato"] = {"id": carrier["id"]}
-        if freight_value is not None:
-            transport["frete"] = float(freight_value)
-        return transport
+            return carrier
+
+        carrier_name = self._get_property_value(
+            deal,
+            self.settings.ploomes_deal_carrier_field,
+            value_keys=("ContactValueName",),
+        )
+        if not carrier_name:
+            return None
+
+        result = self.bling.search_contacts(pesquisa=carrier_name, limite=1)
+        contacts = result.get("data", [])
+        return contacts[0] if contacts else None
 
     def _build_installments(
         self,

@@ -49,14 +49,10 @@ class Settings(BaseSettings):
         "Cartão de Crédito - Bling Conta:4169411,"
         "PIX:4165733"
     )
-    bling_freight_methods: str = (
-        "CIF:R,"
-        "FOB:D,"
-        "Frete por conta de terceiros:T,"
-        "Sedex:4119280,"
-        "Transporte proprio pelo destinatario:4,"
-        "Transporte proprio pelo remetente:3"
-    )
+    # Enum real da API do Bling para transporte.fretePorConta (inteiro):
+    # 0=CIF (remetente), 1=FOB (destinatario), 2=Terceiros, 3/4=transporte proprio, 9=sem transporte.
+    # No Ploomes o campo "Transportador" so deve usar CIF/FOB -- mapeamento 1:1.
+    bling_freight_methods: str = "CIF:0,FOB:1"
     bling_seller_map: str = (
         "110010966:15596341520,"
         "110010962:15596314450,"
@@ -69,6 +65,26 @@ class Settings(BaseSettings):
         "110077780:15596871286,"
         "110078522:15596877219,"
     )
+
+    # Ploomes Deals -> Bling: fluxo pedido de venda + pedido de compra + situacao
+    # Estagio gatilho para gerar pedido de venda + pedido de compra (pipeline_id:trigger_stage_id:stage_apos_gerar_pedidos)
+    ploomes_deal_purchase_trigger_stage_rules: str = "110001615:110020372:110006382"
+    # Estagio que dispara atualizacao de situacao no Bling, sem criar pedido novo (pipeline_id:stage_id)
+    ploomes_deal_logistics_stage_rules: str = "110001615:110008939"
+    # Ids de situacao no Bling para os pedidos de venda (TBD -- bloqueado por escopo OAuth insuficiente, ver plano)
+    bling_situacao_em_processo_compra: int = 0
+    bling_situacao_pronto_faturar: int = 0
+    # Novo campo customizado no Deal para guardar o id do pedido de compra gerado (TBD -- criar no Ploomes)
+    ploomes_deal_purchase_order_id_field: str = ""
+
+    # Postgres (espelho local bling_produtos, bling_order_links, etc.)
+    # Nao usado por nenhum caminho ao vivo do Cloud Run ainda -- ver plano (Risco B)
+    # antes de importar app/clients/db.py de dentro de app/main.py.
+    db_host: str = ""
+    db_port: int = 5432
+    db_name: str = ""
+    db_user: str = ""
+    db_password: str = ""
 
     # Token persistence (local file or GCS on Cloud Run)
     bling_tokens_path: str = "tokens.json"

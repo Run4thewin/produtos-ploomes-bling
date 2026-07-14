@@ -399,6 +399,28 @@ class BlingClient:
         self._raise_bling_error(response)
         return response.json()["data"]
 
+    def update_sales_order_situacao(self, order_id: int | str, situacao_id: int) -> None:
+        response = self._request(
+            "PATCH",
+            f"pedidos/vendas/{order_id}/situacoes/{situacao_id}",
+        )
+        self._raise_bling_error(response)
+
+    def create_purchase_order(self, payload: dict) -> dict:
+        response = self._request(
+            "POST",
+            "pedidos/compras",
+            json=payload,
+        )
+        self._raise_bling_error(response)
+        body = response.json()
+        return body.get("data", body)
+
+    def get_purchase_order(self, order_id: int | str) -> dict:
+        response = self._request("GET", f"pedidos/compras/{order_id}")
+        self._raise_bling_error(response)
+        return response.json()["data"]
+
     def get_product(self, product_id: int | str) -> dict:
         response = self._request("GET", f"produtos/{product_id}")
         self._raise_bling_error(response)

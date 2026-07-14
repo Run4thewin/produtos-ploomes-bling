@@ -1,4 +1,7 @@
 import unittest
+from unittest.mock import patch
+
+import httpx
 
 from app.config import Settings
 from app.services.ploomes_webhook import parse_ploomes_deal_webhook
@@ -27,10 +30,20 @@ class FakePloomesClient:
 
 
 class FakeBlingClient:
-    def __init__(self, bling_products_by_code: dict | None = None):
+    def __init__(
+        self,
+        bling_products_by_code: dict | None = None,
+        contacts_by_name: dict | None = None,
+        purchase_order_error: Exception | None = None,
+    ):
         self.created_payload: dict | None = None
         self.created_products: list[dict] = []
         self.bling_products_by_code = bling_products_by_code or {}
+        self.contacts_by_name = contacts_by_name or {}
+        self.search_contacts_calls: list[str | None] = []
+        self.purchase_order_error = purchase_order_error
+        self.created_purchase_order_payload: dict | None = None
+        self.situacao_updates: list[tuple[int | str, int]] = []
 
     def get_contact_by_document(self, document_number: str | None) -> dict | None:
         contacts = {
@@ -38,6 +51,11 @@ class FakeBlingClient:
             "98765432000111": {"id": 200, "nome": "Transportadora"},
         }
         return contacts.get(document_number or "")
+
+    def search_contacts(self, pesquisa: str | None = None, limite: int = 20, **kwargs) -> dict:
+        self.search_contacts_calls.append(pesquisa)
+        contact = self.contacts_by_name.get(pesquisa or "")
+        return {"data": [contact] if contact else []}
 
     def get_product_by_code(self, code: str) -> dict | None:
         return self.bling_products_by_code.get(code)
@@ -53,9 +71,18 @@ class FakeBlingClient:
     def get_sales_order(self, order_id: int | str) -> dict:
         return {"id": order_id, "numero": "9876"}
 
+    def create_purchase_order(self, payload: dict) -> dict:
+        if self.purchase_order_error:
+            raise self.purchase_order_error
+        self.created_purchase_order_payload = payload
+        return {"id": 777}
 
-def make_settings() -> Settings:
-    return Settings(
+    def update_sales_order_situacao(self, order_id: int | str, situacao_id: int) -> None:
+        self.situacao_updates.append((order_id, situacao_id))
+
+
+def make_settings(**overrides) -> Settings:
+    base = dict(
         ploomes_deal_stage_rules="110001615:110020807:110008939",
         ploomes_deal_error_stage_id=110070771,
         ploomes_deal_order_field="deal_order",
@@ -69,12 +96,14 @@ def make_settings() -> Settings:
         ploomes_deal_freight_type_field="deal_freight_type",
         ploomes_deal_freight_value_field="deal_freight_value",
         bling_payment_methods="BOLETO:5584894",
-        bling_freight_methods="CIF:R",
+        bling_freight_methods="CIF:0,FOB:1",
         bling_seller_map="110010961:15596362133",
     )
+    base.update(overrides)
+    return Settings(**base)
 
 
-def make_deal(order_reference: str | None = None) -> dict:
+def make_deal(order_reference: str | None = None, stage_id: int = 110020807) -> dict:
     properties = [
         {"FieldKey": "deal_po", "StringValue": "PO-123"},
         {"FieldKey": "deal_payment", "IntegerValue": 1100230750, "ObjectValueName": "Boleto"},
@@ -92,7 +121,7 @@ def make_deal(order_reference: str | None = None) -> dict:
         "Id": 55,
         "Title": "Venda teste",
         "PipelineId": 110001615,
-        "StageId": 110020807,
+        "StageId": stage_id,
         "OwnerId": 110010961,
         "Contact": {"Name": "Cliente", "CNPJ": "12.345.678/0001-99", "CPF": None},
         "OtherProperties": properties,
@@ -217,6 +246,247 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertEqual(result["action"], "error_registered")
         self.assertIn("partnumber", result["reason"])
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110070771)
+
+
+class FreightCodeTypeTest(unittest.TestCase):
+    def test_frete_por_conta_is_sent_as_integer(self):
+        # Bling espera transporte.fretePorConta como inteiro (confirmado em pedidos reais:
+        # 0=CIF, 1=FOB), nao como string -- regressao de bug real corrigido nesta sessao.
+        settings = make_settings()
+        service = DealToBlingOrderSyncService(
+            settings, bling=FakeBlingClient(), ploomes=FakePloomesClient(make_deal())
+        )
+
+        transport = service._build_transport(make_deal(), freight_value=None)
+
+        self.assertIsInstance(transport["fretePorConta"], int)
+        self.assertEqual(transport["fretePorConta"], 0)
+
+
+class TransportCarrierResolutionTest(unittest.TestCase):
+    def _deal_with_carrier(self, register: str | None = None, name: str | None = None) -> dict:
+        deal = make_deal()
+        deal["OtherProperties"] = [
+            p for p in deal["OtherProperties"] if p["FieldKey"] != "deal_carrier"
+        ]
+        prop: dict = {"FieldKey": "deal_carrier"}
+        if register:
+            prop["ContactValueRegister"] = register
+        if name:
+            prop["ContactValueName"] = name
+        deal["OtherProperties"].append(prop)
+        return deal
+
+    def test_resolves_carrier_by_document(self):
+        settings = make_settings()
+        bling = FakeBlingClient()
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=FakePloomesClient(make_deal()))
+        deal = self._deal_with_carrier(register="98.765.432/0001-11", name="Transportadora")
+
+        transport = service._build_transport(deal, freight_value=None)
+
+        self.assertEqual(transport["contato"]["id"], 200)
+        self.assertEqual(bling.search_contacts_calls, [])
+
+    def test_falls_back_to_name_when_document_missing(self):
+        settings = make_settings()
+        bling = FakeBlingClient(contacts_by_name={"CORREIOS": {"id": 900, "nome": "CORREIOS"}})
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=FakePloomesClient(make_deal()))
+        deal = self._deal_with_carrier(register=None, name="CORREIOS")
+
+        transport = service._build_transport(deal, freight_value=None)
+
+        self.assertEqual(transport["contato"]["id"], 900)
+        self.assertEqual(bling.search_contacts_calls, ["CORREIOS"])
+
+    def test_stays_silent_when_carrier_not_found_anywhere(self):
+        settings = make_settings()
+        bling = FakeBlingClient()
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=FakePloomesClient(make_deal()))
+        deal = self._deal_with_carrier(register=None, name="TRANSPORTADORA INEXISTENTE")
+
+        transport = service._build_transport(deal, freight_value=None)
+
+        self.assertNotIn("contato", transport)
+
+
+class FakeCursor:
+    def __init__(self, fetchone_result=None):
+        self.fetchone_result = fetchone_result
+        self.executed: list[tuple] = []
+
+    def execute(self, sql, params=None) -> None:
+        self.executed.append((sql, params))
+
+    def fetchone(self):
+        return self.fetchone_result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> bool:
+        return False
+
+
+class FakeDbConn:
+    def __init__(self, fetchone_result=None):
+        self.cursor_obj = FakeCursor(fetchone_result)
+        self.committed = False
+        self.closed = False
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class PurchaseFlowTest(unittest.TestCase):
+    TRIGGER_SETTINGS = dict(
+        ploomes_deal_purchase_trigger_stage_rules="110001615:110020372:110006382",
+    )
+
+    def test_creates_sales_and_purchase_order_and_moves_deal(self):
+        settings = make_settings(**self.TRIGGER_SETTINGS)
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
+        ploomes = FakePloomesClient(
+            make_deal(stage_id=110020372),
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        with patch("app.services.sync_deal_to_bling_order.get_db_conn", return_value=FakeDbConn()):
+            result = service.create_purchase_flow_from_deal(55)
+
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["bling_order_id"], 12345)
+        self.assertEqual(result["bling_purchase_order_id"], 777)
+        self.assertNotIn("fornecedor", bling.created_purchase_order_payload)
+        self.assertEqual(len(bling.created_purchase_order_payload["itens"]), 1)
+        self.assertIn("9876", bling.created_purchase_order_payload["ordemCompra"])
+        self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110006382)
+        self.assertEqual(bling.situacao_updates, [])  # bling_situacao_em_processo_compra=0 por padrao
+
+    def test_skips_when_stage_does_not_match_trigger(self):
+        settings = make_settings(**self.TRIGGER_SETTINGS)
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(make_deal(stage_id=999999))
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        result = service.create_purchase_flow_from_deal(55)
+
+        self.assertEqual(result["action"], "skipped")
+        self.assertIsNone(bling.created_payload)
+
+    def test_purchase_order_failure_does_not_block_sales_order(self):
+        settings = make_settings(**self.TRIGGER_SETTINGS)
+        error_response = httpx.Response(400, json={"error": {"message": "campo invalido"}}, request=httpx.Request("POST", "http://x"))
+        bling = FakeBlingClient(
+            bling_products_by_code={"SKU-123": {"id": 700}},
+            purchase_order_error=httpx.HTTPStatusError("erro", request=error_response.request, response=error_response),
+        )
+        ploomes = FakePloomesClient(
+            make_deal(stage_id=110020372),
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        with patch("app.services.sync_deal_to_bling_order.get_db_conn", return_value=FakeDbConn()):
+            result = service.create_purchase_flow_from_deal(55)
+
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["bling_order_id"], 12345)
+        self.assertIsNone(result["bling_purchase_order_id"])
+
+    def test_advances_situacao_when_configured(self):
+        settings = make_settings(
+            **self.TRIGGER_SETTINGS, bling_situacao_em_processo_compra=99
+        )
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
+        ploomes = FakePloomesClient(
+            make_deal(stage_id=110020372),
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        with patch("app.services.sync_deal_to_bling_order.get_db_conn", return_value=FakeDbConn()):
+            service.create_purchase_flow_from_deal(55)
+
+        self.assertEqual(bling.situacao_updates, [(12345, 99)])
+
+
+class LogisticsStageTest(unittest.TestCase):
+    LOGISTICS_SETTINGS = dict(
+        ploomes_deal_logistics_stage_rules="110001615:110008939",
+    )
+
+    def test_updates_situacao_when_link_found(self):
+        settings = make_settings(
+            **self.LOGISTICS_SETTINGS, bling_situacao_pronto_faturar=42
+        )
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(make_deal(stage_id=110008939))
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_result=(12345, 777)),
+        ):
+            result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "situacao_atualizada")
+        self.assertEqual(bling.situacao_updates, [(12345, 42)])
+
+    def test_skips_when_no_link_found(self):
+        settings = make_settings(
+            **self.LOGISTICS_SETTINGS, bling_situacao_pronto_faturar=42
+        )
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(make_deal(stage_id=110008939))
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_result=None),
+        ):
+            result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["reason"], "pedido_nao_vinculado")
+        self.assertEqual(bling.situacao_updates, [])
+
+    def test_skips_when_stage_does_not_match(self):
+        settings = make_settings(**self.LOGISTICS_SETTINGS)
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(make_deal(stage_id=999999))
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["reason"], "stage_nao_configurado")
+
+    def test_skips_when_situacao_not_configured(self):
+        settings = make_settings(**self.LOGISTICS_SETTINGS)  # bling_situacao_pronto_faturar=0 (default)
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(make_deal(stage_id=110008939))
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_result=(12345, 777)),
+        ):
+            result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["reason"], "situacao_nao_configurada")
+        self.assertEqual(bling.situacao_updates, [])
 
 
 if __name__ == "__main__":

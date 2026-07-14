@@ -319,9 +319,18 @@ async def ploomes_deal_webhook(
         return {"status": "ignored", "reason": "delete_nao_processado"}
 
     try:
-        result = DealToBlingOrderSyncService(settings).create_bling_order_from_deal(
-            parsed["deal_id"]
-        )
+        service = DealToBlingOrderSyncService(settings)
+        # Tenta, em ordem, cada regra que pode se aplicar ao estagio atual do Deal:
+        # 1) regra legada (ploomes_deal_stage_rules, ex: pipeline Portal) -- so cria pedido de venda.
+        # 2) regra nova (ploomes_deal_purchase_trigger_stage_rules) -- cria pedido de venda + compra.
+        # 3) regra de logistica (ploomes_deal_logistics_stage_rules) -- so atualiza situacao no Bling.
+        # Cada uma retorna action="skipped" quando o estagio atual do Deal nao bate com ela.
+        result = service.create_bling_order_from_deal(parsed["deal_id"])
+        if result.get("action") == "skipped":
+            result = service.create_purchase_flow_from_deal(parsed["deal_id"])
+        if result.get("action") == "skipped":
+            result = service.update_situacao_for_logistics_stage(parsed["deal_id"])
+
         logger.info(
             "Webhook Ploomes Deal processado | deal_id=%s result_action=%s elapsed_ms=%s",
             parsed["deal_id"],
