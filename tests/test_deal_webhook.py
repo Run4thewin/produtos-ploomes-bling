@@ -247,6 +247,32 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertIn("partnumber", result["reason"])
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110070771)
 
+    def test_reports_all_missing_product_fields_at_once(self):
+        # Sem repetir o ciclo de "corrige um campo, tenta de novo, descobre o proximo" --
+        # o produto esta sem partnumber E sem fabricante ao mesmo tempo, a mensagem
+        # de erro deve listar os dois de uma vez.
+        settings = make_settings()
+        bling = FakeBlingClient()
+        product_missing_fields = make_ploomes_product(settings)
+        product_missing_fields["OtherProperties"] = [
+            item
+            for item in product_missing_fields["OtherProperties"]
+            if item["FieldKey"]
+            not in (settings.ploomes_field_partnumber, settings.ploomes_field_fabricante)
+        ]
+        ploomes = FakePloomesClient(
+            make_deal(),
+            make_quote(),
+            products={999: product_missing_fields},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        result = service.create_bling_order_from_deal(55)
+
+        self.assertEqual(result["action"], "error_registered")
+        self.assertIn("partnumber", result["reason"])
+        self.assertIn("fabricante", result["reason"])
+
 
 class FreightCodeTypeTest(unittest.TestCase):
     def test_frete_por_conta_is_sent_as_integer(self):

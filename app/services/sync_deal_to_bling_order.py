@@ -10,7 +10,12 @@ from app.clients.bling import BlingClient
 from app.clients.db import get_db_conn
 from app.clients.ploomes import PloomesClient
 from app.config import Settings, get_settings
-from app.services.mapping import ProductMappingError, get_other_property, map_ploomes_to_bling
+from app.services.mapping import (
+    ProductMappingError,
+    extract_ploomes_fields,
+    get_other_property,
+    map_ploomes_to_bling,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -614,7 +619,7 @@ class DealToBlingOrderSyncService:
         partnumber = str(partnumber).strip() if partnumber else ""
         if not partnumber:
             raise DealOrderValidationError(
-                f"Produto Ploomes {ploomes_product_id} sem partnumber (SKU) cadastrado"
+                self._describe_missing_product_fields(ploomes_product, missing_partnumber=True)
             )
 
         bling_product = self.bling.get_product_by_code(partnumber)
@@ -642,6 +647,26 @@ class DealToBlingOrderSyncService:
             bling_product.get("id"),
         )
         return bling_product
+
+    def _describe_missing_product_fields(
+        self, ploomes_product: dict[str, Any], missing_partnumber: bool = False
+    ) -> str:
+        # Reporta de uma vez todos os campos obrigatorios que estao faltando no produto,
+        # em vez de bloquear so pelo partnumber e deixar o usuario descobrir os outros
+        # (fabricante, breve descricao, preco) num segundo round de tentativa.
+        fields = extract_ploomes_fields(ploomes_product, self.settings)
+        missing = []
+        if missing_partnumber:
+            missing.append("partnumber (SKU)")
+        if not fields["fabricante"]:
+            missing.append("fabricante")
+        if not fields["breve_descricao"]:
+            missing.append("breve descricao")
+        if fields["preco"] <= 0:
+            missing.append("preco de venda")
+
+        ploomes_id = ploomes_product.get("Id", "?")
+        return f"Produto Ploomes {ploomes_id} sem campos obrigatorios: {', '.join(missing)}"
 
     def _build_transport(
         self,
