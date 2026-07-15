@@ -589,7 +589,12 @@ class DealToBlingOrderSyncService:
             quantity_float = float(quantity)
             total += self._apply_discount(unit_price, discount) * quantity_float
             bling_product = self._resolve_bling_product_for_item(product)
-            descricao_completa = (product.get("ProductName") or "").upper()
+            descricao = (product.get("ProductName") or "").upper()
+            if len(descricao) > ITEM_DESCRICAO_MAX_LENGTH:
+                raise DealOrderValidationError(
+                    f"Item {descricao} com descricao maior que {ITEM_DESCRICAO_MAX_LENGTH} "
+                    f"caracteres ({len(descricao)})"
+                )
             items.append(
                 {
                     "produto": {"id": bling_product["id"]},
@@ -598,12 +603,8 @@ class DealToBlingOrderSyncService:
                     "desconto": discount,
                     "valor": unit_price,
                     "aliquotaIPI": 0,
-                    "descricao": descricao_completa[:ITEM_DESCRICAO_MAX_LENGTH],
-                    "descricaoDetalhada": (
-                        descricao_completa
-                        if len(descricao_completa) > ITEM_DESCRICAO_MAX_LENGTH
-                        else ""
-                    ),
+                    "descricao": descricao,
+                    "descricaoDetalhada": "",
                     "comissao": {
                         "base": quantity_float * unit_price,
                         "aliquota": 1.5,
