@@ -272,6 +272,9 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertEqual(result["action"], "error_registered")
         self.assertIn("partnumber", result["reason"])
         self.assertIn("fabricante", result["reason"])
+        self.assertIn(
+            "https://app10.ploomes.com/Products/table/product/999", result["reason"]
+        )
 
 
 class FreightCodeTypeTest(unittest.TestCase):

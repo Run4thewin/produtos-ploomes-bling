@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Ploomes
     ploomes_user_key: str = ""
     ploomes_api_base: str = "https://api2.ploomes.com"
+    ploomes_web_base_url: str = "https://app10.ploomes.com"
     ploomes_group_id: int = 0
     ploomes_field_fabricante: str = "product_5DCA9FE9-D9C8-4C33-B7D9-A0E783E36CDB"
     ploomes_field_partnumber: str = "product_5F984A7A-AF01-4054-AEC7-702568153273"

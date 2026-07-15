@@ -636,7 +636,8 @@ class DealToBlingOrderSyncService:
             payload = map_ploomes_to_bling(ploomes_product, self.settings)
         except ProductMappingError as exc:
             raise DealOrderValidationError(
-                f"Produto Ploomes {ploomes_product_id} nao pode ser criado no Bling: {exc}"
+                f"Produto Ploomes {ploomes_product_id} nao pode ser criado no Bling: {exc} "
+                f"({self._ploomes_product_url(ploomes_product_id)})"
             ) from exc
         payload["codigo"] = partnumber
         bling_product = self.bling.create_product(payload)
@@ -666,7 +667,13 @@ class DealToBlingOrderSyncService:
             missing.append("preco de venda")
 
         ploomes_id = ploomes_product.get("Id", "?")
-        return f"Produto Ploomes {ploomes_id} sem campos obrigatorios: {', '.join(missing)}"
+        return (
+            f"Produto Ploomes {ploomes_id} sem campos obrigatorios: {', '.join(missing)} "
+            f"({self._ploomes_product_url(ploomes_id)})"
+        )
+
+    def _ploomes_product_url(self, ploomes_product_id: Any) -> str:
+        return f"{self.settings.ploomes_web_base_url}/Products/table/product/{ploomes_product_id}"
 
     def _build_transport(
         self,
