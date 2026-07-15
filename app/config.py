@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     bling_situacao_pronto_faturar: int = 0
     # Novo campo customizado no Deal para guardar o id do pedido de compra gerado (TBD -- criar no Ploomes)
     ploomes_deal_purchase_order_id_field: str = ""
+    # Deal pulando direto de um desses estagios (Orcamento/Analise de Credito/Analise
+    # aprovada) para Logistica, sem passar por "Gerar pedido de venda" -- gera pedido
+    # de venda ali mesmo, ja com situacao pronto_faturar. Formato: pipeline_id:origem1,origem2,...:destino
+    ploomes_deal_direct_to_logistics_rules: str = (
+        "110001615:110006379,110006380,110355350:110008939"
+    )
 
     # Postgres (espelho local bling_produtos, bling_order_links, etc.)
     # Nao usado por nenhum caminho ao vivo do Cloud Run ainda -- ver plano (Risco B)

@@ -47,6 +47,13 @@ class LogisticsRule:
     stage_id: int
 
 
+@dataclass(frozen=True)
+class DirectToLogisticsRule:
+    pipeline_id: int
+    source_stage_ids: frozenset[int]
+    target_stage_id: int
+
+
 class DealToBlingOrderSyncService:
     def __init__(
         self,
@@ -366,8 +373,18 @@ class DealToBlingOrderSyncService:
                 "deal_id": deal.get("Id"),
             }
 
+        previous_stage_id = self._record_and_get_previous_stage(deal["Id"], deal.get("StageId"))
+
         link = self._get_order_link(deal["Id"])
         if not link or not link.get("bling_pedido_venda_id"):
+            direct_rule = self._find_direct_to_logistics_rule(deal)
+            if direct_rule and previous_stage_id in direct_rule.source_stage_ids:
+                logger.info(
+                    "[LOGISTICS_DIRECT] Deal %s pulou direto de %s para Logistica | gerando pedido de venda",
+                    deal.get("Id"),
+                    previous_stage_id,
+                )
+                return self._create_sales_order_direct_to_logistics(deal)
             return {
                 "action": "skipped",
                 "reason": "pedido_nao_vinculado",
@@ -403,6 +420,124 @@ class DealToBlingOrderSyncService:
             "bling_order_id": sales_order_id,
             "situacao_id": situacao_id,
         }
+
+    def _create_sales_order_direct_to_logistics(self, deal: dict[str, Any]) -> dict[str, Any]:
+        # Deal pulou direto de um estagio anterior (Orcamento/Analise de Credito/
+        # Analise aprovada) para Logistica, sem passar por "Gerar pedido de venda".
+        # Cria o pedido de venda aqui mesmo, ja com situacao pronto_faturar -- sem
+        # pedido de compra, ja que esse caminho nao passou pelo fluxo de compra.
+        try:
+            quote = self.ploomes.get_latest_quote_by_deal(deal["Id"])
+            if not quote:
+                raise DealOrderValidationError("Deal sem quote/orcamento para gerar pedido")
+
+            payload = self._build_sales_order_payload(deal, quote)
+            created = self.bling.create_sales_order(payload)
+            sales_order_id = created.get("id")
+            if not sales_order_id:
+                raise RuntimeError(f"Bling criou pedido de venda sem retornar id: {created}")
+            sales_order = self.bling.get_sales_order(sales_order_id)
+        except DealOrderValidationError as exc:
+            logger.warning("[LOGISTICS_DIRECT] Deal %s nao processado: %s", deal.get("Id"), exc)
+            self._mark_deal_error(deal["Id"], str(exc))
+            return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": str(exc)}
+        except RuntimeError as exc:
+            logger.warning(
+                "[LOGISTICS_DIRECT] Erro operacional Deal %s: %s", deal.get("Id"), exc
+            )
+            self._mark_deal_error(deal["Id"], str(exc))
+            return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": str(exc)}
+        except httpx.HTTPStatusError as exc:
+            reason = self._describe_bling_http_error(exc)
+            logger.warning("[LOGISTICS_DIRECT] Erro Bling Deal %s: %s", deal.get("Id"), reason)
+            self._mark_deal_error(deal["Id"], reason)
+            return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": reason}
+
+        self._save_order_link(deal["Id"], sales_order_id, None)
+
+        situacao_id = self.settings.bling_situacao_pronto_faturar
+        if situacao_id:
+            try:
+                self.bling.update_sales_order_situacao(sales_order_id, situacao_id)
+                self._update_order_link_situacao(deal["Id"], situacao_id)
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "[LOGISTICS_DIRECT] Falha ao mudar situacao do pedido %s: %s",
+                    sales_order_id,
+                    self._describe_bling_http_error(exc),
+                )
+        else:
+            logger.info(
+                "[LOGISTICS_DIRECT] situacao pronto_faturar nao configurada (id=0) | pedido=%s | pulando",
+                sales_order_id,
+            )
+
+        order_number = sales_order.get("numero") or sales_order_id
+        order_reference = (
+            f"Pedido Bling {order_number}: "
+            f"https://www.bling.com.br/vendas.php#edit/{sales_order_id}"
+        )
+        self.ploomes.update_deal(
+            deal["Id"],
+            {
+                "OtherProperties": [
+                    {
+                        "FieldKey": self.settings.ploomes_deal_order_field,
+                        "StringValue": order_reference,
+                    }
+                ]
+            },
+        )
+
+        logger.info(
+            "[LOGISTICS_DIRECT] Pedido de venda %s criado direto para Logistica a partir do Deal %s",
+            sales_order_id,
+            deal.get("Id"),
+        )
+        return {
+            "action": "created",
+            "deal_id": deal.get("Id"),
+            "bling_order_id": sales_order_id,
+            "bling_order_number": sales_order.get("numero"),
+        }
+
+    def _record_and_get_previous_stage(
+        self, deal_id: int | str, current_stage_id: Any
+    ) -> int | None:
+        try:
+            conn = get_db_conn(self.settings)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT last_seen_stage_id FROM ploomes_deal_stage_tracking "
+                        "WHERE ploomes_deal_id = %s",
+                        (deal_id,),
+                    )
+                    row = cur.fetchone()
+                    previous_stage_id = row[0] if row else None
+
+                    cur.execute(
+                        """
+                        INSERT INTO ploomes_deal_stage_tracking
+                            (ploomes_deal_id, last_seen_stage_id, updated_at)
+                        VALUES (%s, %s, now())
+                        ON CONFLICT (ploomes_deal_id) DO UPDATE SET
+                            last_seen_stage_id = EXCLUDED.last_seen_stage_id,
+                            updated_at = EXCLUDED.updated_at
+                        """,
+                        (deal_id, current_stage_id),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            return previous_stage_id
+        except Exception as exc:
+            logger.warning(
+                "[STAGE_TRACKING] Falha ao ler/gravar ploomes_deal_stage_tracking | deal_id=%s | %s",
+                deal_id,
+                exc,
+            )
+            return None
 
     def _get_order_link(self, deal_id: int | str) -> dict[str, Any] | None:
         try:
@@ -478,6 +613,38 @@ class DealToBlingOrderSyncService:
                 continue
             rules.append(LogisticsRule(*(int(part) for part in parts)))
         return rules
+
+    def _find_direct_to_logistics_rule(
+        self, deal: dict[str, Any]
+    ) -> DirectToLogisticsRule | None:
+        pipeline_id = int(deal.get("PipelineId") or 0)
+        for rule in self._direct_to_logistics_rules():
+            if rule.pipeline_id == pipeline_id:
+                return rule
+        return None
+
+    def _direct_to_logistics_rules(self) -> list[DirectToLogisticsRule]:
+        # Formato: pipeline_id:origem1,origem2,...:destino (uma unica regra, nao
+        # multiplas separadas por virgula -- a virgula aqui separa as origens).
+        raw = self.settings.ploomes_deal_direct_to_logistics_rules.strip()
+        if not raw:
+            return []
+        parts = raw.split(":")
+        if len(parts) != 3:
+            return []
+        pipeline_id_str, origins_str, target_str = (part.strip() for part in parts)
+        origin_ids = frozenset(
+            int(item.strip()) for item in origins_str.split(",") if item.strip()
+        )
+        if not pipeline_id_str or not origin_ids or not target_str:
+            return []
+        return [
+            DirectToLogisticsRule(
+                pipeline_id=int(pipeline_id_str),
+                source_stage_ids=origin_ids,
+                target_stage_id=int(target_str),
+            )
+        ]
 
     def _build_sales_order_payload(self, deal: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
         contact = deal.get("Contact") or {}

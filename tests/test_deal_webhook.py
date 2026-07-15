@@ -398,7 +398,11 @@ class TransportCarrierResolutionTest(unittest.TestCase):
 
 
 class FakeCursor:
-    def __init__(self, fetchone_result=None):
+    def __init__(self, fetchone_result=None, fetchone_results=None):
+        # fetchone_results (lista) tem prioridade: cada chamada de fetchone() consome
+        # o proximo item da fila, na ordem em que as queries acontecem. fetchone_result
+        # (singular) e mantido para os testes mais antigos, com um unico resultado fixo.
+        self.fetchone_queue = list(fetchone_results) if fetchone_results is not None else None
         self.fetchone_result = fetchone_result
         self.executed: list[tuple] = []
 
@@ -406,6 +410,8 @@ class FakeCursor:
         self.executed.append((sql, params))
 
     def fetchone(self):
+        if self.fetchone_queue is not None:
+            return self.fetchone_queue.pop(0) if self.fetchone_queue else None
         return self.fetchone_result
 
     def __enter__(self):
@@ -416,8 +422,8 @@ class FakeCursor:
 
 
 class FakeDbConn:
-    def __init__(self, fetchone_result=None):
-        self.cursor_obj = FakeCursor(fetchone_result)
+    def __init__(self, fetchone_result=None, fetchone_results=None):
+        self.cursor_obj = FakeCursor(fetchone_result, fetchone_results)
         self.committed = False
         self.closed = False
 
@@ -574,6 +580,72 @@ class LogisticsStageTest(unittest.TestCase):
         self.assertEqual(result["action"], "skipped")
         self.assertEqual(result["reason"], "situacao_nao_configurada")
         self.assertEqual(bling.situacao_updates, [])
+
+
+class DirectToLogisticsTest(unittest.TestCase):
+    SETTINGS_KWARGS = dict(
+        ploomes_deal_logistics_stage_rules="110001615:110008939",
+        ploomes_deal_direct_to_logistics_rules="110001615:110006379,110006380,110355350:110008939",
+        bling_situacao_pronto_faturar=42,
+    )
+
+    def test_creates_sales_order_when_jump_recognized(self):
+        settings = make_settings(**self.SETTINGS_KWARGS)
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
+        ploomes = FakePloomesClient(
+            make_deal(stage_id=110008939),
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        # 1a leitura: previous_stage_id = 110006380 (Analise de Credito, esta na lista
+        # configurada). 2a leitura: nenhum vinculo existente ainda (None).
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_results=[(110006380,), None]),
+        ):
+            result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["bling_order_id"], 12345)
+        self.assertEqual(bling.situacao_updates, [(12345, 42)])
+        self.assertEqual(ploomes.updated_deals[0][1]["OtherProperties"][0]["FieldKey"], "deal_order")
+
+    def test_skips_when_previous_stage_not_in_configured_list(self):
+        settings = make_settings(**self.SETTINGS_KWARGS)
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(make_deal(stage_id=110008939))
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        # previous_stage_id = 110006378 ("Novos Lead's"), fora da lista configurada.
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_results=[(110006378,), None]),
+        ):
+            result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["reason"], "pedido_nao_vinculado")
+        self.assertIsNone(bling.created_payload)
+
+    def test_skips_when_deal_seen_for_the_first_time(self):
+        settings = make_settings(**self.SETTINGS_KWARGS)
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(make_deal(stage_id=110008939))
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        # nenhuma linha de rastreamento ainda (primeira vez que vemos esse Deal) e
+        # nenhum vinculo de pedido -- os dois fetchone() retornam None.
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_results=[None, None]),
+        ):
+            result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["reason"], "pedido_nao_vinculado")
+        self.assertIsNone(bling.created_payload)
 
 
 if __name__ == "__main__":
