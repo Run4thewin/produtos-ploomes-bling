@@ -68,8 +68,10 @@ class Settings(BaseSettings):
     )
 
     # Ploomes Deals -> Bling: fluxo pedido de venda + pedido de compra + situacao
-    # Estagio gatilho para gerar pedido de venda + pedido de compra (pipeline_id:trigger_stage_id:stage_apos_gerar_pedidos)
-    ploomes_deal_purchase_trigger_stage_rules: str = "110001615:110020372:110006382"
+    # Estagio "Gerar pedido de venda" foi removido do funil -- o gatilho agora e a
+    # propria entrada em "Solicitacao de Compra" (pipeline_id:trigger_stage_id:stage_apos_gerar_pedidos,
+    # trigger e destino sao o mesmo estagio: o Deal so sai dali quando alguem move manualmente).
+    ploomes_deal_purchase_trigger_stage_rules: str = "110001615:110006382:110006382"
     # Estagio que dispara atualizacao de situacao no Bling, sem criar pedido novo (pipeline_id:stage_id)
     ploomes_deal_logistics_stage_rules: str = "110001615:110008939"
     # Ids de situacao no Bling para os pedidos de venda (TBD -- bloqueado por escopo OAuth insuficiente, ver plano)

@@ -439,14 +439,14 @@ class FakeDbConn:
 
 class PurchaseFlowTest(unittest.TestCase):
     TRIGGER_SETTINGS = dict(
-        ploomes_deal_purchase_trigger_stage_rules="110001615:110020372:110006382",
+        ploomes_deal_purchase_trigger_stage_rules="110001615:110006382:110006382",
     )
 
     def test_creates_sales_and_purchase_order_and_moves_deal(self):
         settings = make_settings(**self.TRIGGER_SETTINGS)
         bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
         ploomes = FakePloomesClient(
-            make_deal(stage_id=110020372),
+            make_deal(stage_id=110006382),
             make_quote(),
             products={999: make_ploomes_product(settings)},
         )
@@ -483,7 +483,7 @@ class PurchaseFlowTest(unittest.TestCase):
             purchase_order_error=httpx.HTTPStatusError("erro", request=error_response.request, response=error_response),
         )
         ploomes = FakePloomesClient(
-            make_deal(stage_id=110020372),
+            make_deal(stage_id=110006382),
             make_quote(),
             products={999: make_ploomes_product(settings)},
         )
@@ -502,7 +502,7 @@ class PurchaseFlowTest(unittest.TestCase):
         )
         bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
         ploomes = FakePloomesClient(
-            make_deal(stage_id=110020372),
+            make_deal(stage_id=110006382),
             make_quote(),
             products={999: make_ploomes_product(settings)},
         )
