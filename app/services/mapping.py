@@ -264,13 +264,14 @@ def extract_ploomes_fields(ploomes_product: dict, settings: Settings) -> dict[st
     descricao_campo = _clean(
         get_other_property(ploomes_product, settings.ploomes_field_descricao)
     )
-    breve_descricao = parse_breve_descricao_from_name(
-        ploomes_product.get("Name") or "",
-        fabricante,
-        partnumber,
-    )
+    name = _clean(ploomes_product.get("Name"))
+    breve_descricao = parse_breve_descricao_from_name(name, fabricante, partnumber)
     if not breve_descricao and descricao_campo and "peso:" not in descricao_campo.lower():
         breve_descricao = descricao_campo
+    if not breve_descricao:
+        # Nome era so "{fabricante} {partnumber}" (nada sobrou apos tirar os prefixos) ou
+        # nao segue essa convencao -- usa o nome completo em vez de deixar vazio.
+        breve_descricao = name
 
     optional = parse_optional_details_from_text(descricao_campo)
     ncm_value = get_other_property(ploomes_product, settings.ploomes_field_ncm)

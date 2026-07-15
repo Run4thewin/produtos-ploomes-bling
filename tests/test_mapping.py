@@ -1,7 +1,7 @@
 import unittest
 
 from app.config import Settings
-from app.services.mapping import map_bling_to_ploomes
+from app.services.mapping import map_bling_to_ploomes, map_ploomes_to_bling
 
 
 class BlingToPloomesMappingTest(unittest.TestCase):
@@ -26,6 +26,26 @@ class BlingToPloomesMappingTest(unittest.TestCase):
                 for item in payload.get("OtherProperties", [])
             )
         )
+
+
+class PloomesToBlingMappingTest(unittest.TestCase):
+    def test_breve_descricao_falls_back_to_full_name_when_stripping_leaves_nothing(self):
+        settings = Settings()
+        ploomes_product = {
+            "Id": 999,
+            "Name": "ACME SKU-123",  # so fabricante + partnumber, nada mais
+            "UnitPrice": 100,
+            "Suspended": False,
+            "OtherProperties": [
+                {"FieldKey": settings.ploomes_field_fabricante, "StringValue": "ACME"},
+                {"FieldKey": settings.ploomes_field_partnumber, "StringValue": "SKU-123"},
+            ],
+        }
+
+        payload = map_ploomes_to_bling(ploomes_product, settings)
+
+        self.assertEqual(payload["descricaoCurta"], "ACME SKU-123")
+        self.assertEqual(payload["codigo"], "SKU-123")
 
 
 if __name__ == "__main__":
