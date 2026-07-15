@@ -46,6 +46,7 @@ class PloomesToBlingMappingTest(unittest.TestCase):
 
         self.assertEqual(payload["descricaoCurta"], "ACME SKU-123")
         self.assertEqual(payload["codigo"], "SKU-123")
+        self.assertEqual(payload["nome"], "ACME SKU-123")  # nao duplicado
 
 
 if __name__ == "__main__":

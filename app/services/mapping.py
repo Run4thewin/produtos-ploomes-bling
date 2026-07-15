@@ -39,8 +39,14 @@ PLOOMES_NAME_MAX_LENGTH = 200
 
 
 def build_product_name(fabricante: str, partnumber: str, breve_descricao: str) -> str:
-    parts = [fabricante, partnumber, breve_descricao]
-    name = " ".join(part for part in parts if part)
+    prefix = " ".join(part for part in (fabricante, partnumber) if part)
+    if prefix and breve_descricao.upper().startswith(prefix.upper()):
+        # breve_descricao ja inclui fabricante+partnumber (caso de fallback em
+        # extract_ploomes_fields) -- nao duplicar colando o prefixo de novo.
+        name = breve_descricao
+    else:
+        parts = [fabricante, partnumber, breve_descricao]
+        name = " ".join(part for part in parts if part)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:PLOOMES_NAME_MAX_LENGTH].strip()
 
