@@ -191,6 +191,37 @@ class PloomesDealWebhookTest(unittest.TestCase):
         self.assertEqual(bling.created_products, [])
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110008939)
 
+    def test_item_description_is_truncated_to_50_chars(self):
+        settings = make_settings()
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
+        long_name = "Disjuntor Tripolar Merlin Gerin C60N C32 Curva C 400V 6KA Trifasico"
+        quote = {
+            "Id": 77,
+            "Products": [
+                {
+                    "ProductId": 999,
+                    "ProductName": long_name,
+                    "Quantity": 2,
+                    "UnitPrice": 100,
+                    "Discount": 10,
+                }
+            ],
+        }
+        ploomes = FakePloomesClient(
+            make_deal(),
+            quote,
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        result = service.create_bling_order_from_deal(55)
+
+        self.assertEqual(result["action"], "created")
+        item = bling.created_payload["itens"][0]
+        self.assertEqual(len(item["descricao"]), 50)
+        self.assertEqual(item["descricao"], long_name.upper()[:50])
+        self.assertEqual(item["descricaoDetalhada"], long_name.upper())
+
     def test_service_attempts_bling_order_even_with_existing_reference(self):
         settings = make_settings()
         bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})

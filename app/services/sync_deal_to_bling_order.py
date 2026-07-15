@@ -19,6 +19,9 @@ from app.services.mapping import (
 
 logger = logging.getLogger(__name__)
 
+# O campo descricao do item de pedido no Bling rejeita (HTTP 400) acima de 50 chars.
+ITEM_DESCRICAO_MAX_LENGTH = 50
+
 
 class DealOrderValidationError(Exception):
     pass
@@ -586,6 +589,7 @@ class DealToBlingOrderSyncService:
             quantity_float = float(quantity)
             total += self._apply_discount(unit_price, discount) * quantity_float
             bling_product = self._resolve_bling_product_for_item(product)
+            descricao_completa = (product.get("ProductName") or "").upper()
             items.append(
                 {
                     "produto": {"id": bling_product["id"]},
@@ -594,8 +598,12 @@ class DealToBlingOrderSyncService:
                     "desconto": discount,
                     "valor": unit_price,
                     "aliquotaIPI": 0,
-                    "descricao": (product.get("ProductName") or "").upper(),
-                    "descricaoDetalhada": "",
+                    "descricao": descricao_completa[:ITEM_DESCRICAO_MAX_LENGTH],
+                    "descricaoDetalhada": (
+                        descricao_completa
+                        if len(descricao_completa) > ITEM_DESCRICAO_MAX_LENGTH
+                        else ""
+                    ),
                     "comissao": {
                         "base": quantity_float * unit_price,
                         "aliquota": 1.5,
