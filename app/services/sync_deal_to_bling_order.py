@@ -235,18 +235,16 @@ class DealToBlingOrderSyncService:
             raise RuntimeError(f"Bling criou pedido de venda sem retornar id: {created}")
         sales_order = self.bling.get_sales_order(sales_order_id)
 
-        purchase_order_id = self._create_linked_purchase_order(payload["itens"], sales_order)
-
-        self._save_order_link(deal["Id"], sales_order_id, purchase_order_id)
-        self._mark_deal_purchase_flow_success(deal, sales_order, purchase_order_id, rule)
+        # Nao cria mais pedido de compra vinculado nesta etapa -- so o pedido de venda.
+        self._save_order_link(deal["Id"], sales_order_id, None)
+        self._mark_deal_purchase_flow_success(deal, sales_order, None, rule)
         self._advance_sales_order_situacao(
             sales_order_id, self.settings.bling_situacao_em_processo_compra
         )
 
         logger.info(
-            "[PURCHASE_FLOW] Pedido de venda %s + pedido de compra %s criados a partir do Deal %s",
+            "[PURCHASE_FLOW] Pedido de venda %s criado a partir do Deal %s",
             sales_order_id,
-            purchase_order_id,
             deal.get("Id"),
         )
         return {
@@ -254,39 +252,8 @@ class DealToBlingOrderSyncService:
             "deal_id": deal.get("Id"),
             "bling_order_id": sales_order_id,
             "bling_order_number": sales_order.get("numero"),
-            "bling_purchase_order_id": purchase_order_id,
+            "bling_purchase_order_id": None,
         }
-
-    def _create_linked_purchase_order(
-        self, sales_items: list[dict[str, Any]], sales_order: dict[str, Any]
-    ) -> int | None:
-        # Sem fornecedor e sem regra de replicacao de itens confirmada -- payload minimo,
-        # reaproveitando os itens do pedido de venda. Ver plano: "nao precisa ser preenchido
-        # agora" (fornecedor) e "nao aplicar esta regra se nao for necessario" (itens).
-        items = [
-            {
-                "descricao": item.get("descricao"),
-                "unidade": item.get("unidade"),
-                "quantidade": item.get("quantidade"),
-                "valor": item.get("valor"),
-                "produto": item.get("produto"),
-            }
-            for item in sales_items
-        ]
-        payload: dict[str, Any] = {
-            "itens": items,
-            "ordemCompra": f"Pedido de venda {sales_order.get('numero') or sales_order.get('id')}",
-        }
-        try:
-            created = self.bling.create_purchase_order(payload)
-        except httpx.HTTPStatusError as exc:
-            logger.warning(
-                "[PURCHASE_FLOW] Falha ao criar pedido de compra vinculado ao pedido de venda %s: %s",
-                sales_order.get("id"),
-                self._describe_bling_http_error(exc),
-            )
-            return None
-        return created.get("id")
 
     def _advance_sales_order_situacao(self, sales_order_id: int, situacao_id: int) -> None:
         if not situacao_id:

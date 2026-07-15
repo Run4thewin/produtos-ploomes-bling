@@ -1,8 +1,6 @@
 import unittest
 from unittest.mock import patch
 
-import httpx
-
 from app.config import Settings
 from app.services.ploomes_webhook import parse_ploomes_deal_webhook
 from app.services.sync_deal_to_bling_order import DealToBlingOrderSyncService
@@ -34,15 +32,12 @@ class FakeBlingClient:
         self,
         bling_products_by_code: dict | None = None,
         contacts_by_name: dict | None = None,
-        purchase_order_error: Exception | None = None,
     ):
         self.created_payload: dict | None = None
         self.created_products: list[dict] = []
         self.bling_products_by_code = bling_products_by_code or {}
         self.contacts_by_name = contacts_by_name or {}
         self.search_contacts_calls: list[str | None] = []
-        self.purchase_order_error = purchase_order_error
-        self.created_purchase_order_payload: dict | None = None
         self.situacao_updates: list[tuple[int | str, int]] = []
 
     def get_contact_by_document(self, document_number: str | None) -> dict | None:
@@ -70,12 +65,6 @@ class FakeBlingClient:
 
     def get_sales_order(self, order_id: int | str) -> dict:
         return {"id": order_id, "numero": "9876"}
-
-    def create_purchase_order(self, payload: dict) -> dict:
-        if self.purchase_order_error:
-            raise self.purchase_order_error
-        self.created_purchase_order_payload = payload
-        return {"id": 777}
 
     def update_sales_order_situacao(self, order_id: int | str, situacao_id: int) -> None:
         self.situacao_updates.append((order_id, situacao_id))
@@ -442,7 +431,7 @@ class PurchaseFlowTest(unittest.TestCase):
         ploomes_deal_purchase_trigger_stage_rules="110001615:110006382:110006382",
     )
 
-    def test_creates_sales_and_purchase_order_and_moves_deal(self):
+    def test_creates_sales_order_only_and_leaves_deal_in_place(self):
         settings = make_settings(**self.TRIGGER_SETTINGS)
         bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
         ploomes = FakePloomesClient(
@@ -457,10 +446,7 @@ class PurchaseFlowTest(unittest.TestCase):
 
         self.assertEqual(result["action"], "created")
         self.assertEqual(result["bling_order_id"], 12345)
-        self.assertEqual(result["bling_purchase_order_id"], 777)
-        self.assertNotIn("fornecedor", bling.created_purchase_order_payload)
-        self.assertEqual(len(bling.created_purchase_order_payload["itens"]), 1)
-        self.assertIn("9876", bling.created_purchase_order_payload["ordemCompra"])
+        self.assertIsNone(result["bling_purchase_order_id"])
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110006382)
         self.assertEqual(bling.situacao_updates, [])  # bling_situacao_em_processo_compra=0 por padrao
 
@@ -474,27 +460,6 @@ class PurchaseFlowTest(unittest.TestCase):
 
         self.assertEqual(result["action"], "skipped")
         self.assertIsNone(bling.created_payload)
-
-    def test_purchase_order_failure_does_not_block_sales_order(self):
-        settings = make_settings(**self.TRIGGER_SETTINGS)
-        error_response = httpx.Response(400, json={"error": {"message": "campo invalido"}}, request=httpx.Request("POST", "http://x"))
-        bling = FakeBlingClient(
-            bling_products_by_code={"SKU-123": {"id": 700}},
-            purchase_order_error=httpx.HTTPStatusError("erro", request=error_response.request, response=error_response),
-        )
-        ploomes = FakePloomesClient(
-            make_deal(stage_id=110006382),
-            make_quote(),
-            products={999: make_ploomes_product(settings)},
-        )
-        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
-
-        with patch("app.services.sync_deal_to_bling_order.get_db_conn", return_value=FakeDbConn()):
-            result = service.create_purchase_flow_from_deal(55)
-
-        self.assertEqual(result["action"], "created")
-        self.assertEqual(result["bling_order_id"], 12345)
-        self.assertIsNone(result["bling_purchase_order_id"])
 
     def test_advances_situacao_when_configured(self):
         settings = make_settings(
