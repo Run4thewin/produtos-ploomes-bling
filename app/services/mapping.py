@@ -301,8 +301,6 @@ def validate_ploomes_required_fields(fields: dict[str, Any], ploomes_product: di
         missing.append("partnumber (Code)")
     if not fields["breve_descricao"]:
         missing.append("breve descricao")
-    if fields["preco"] <= 0:
-        missing.append("preco de venda (UnitPrice)")
 
     if missing:
         ploomes_id = ploomes_product.get("Id", "?")

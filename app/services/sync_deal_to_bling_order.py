@@ -815,8 +815,6 @@ class DealToBlingOrderSyncService:
             missing.append("fabricante")
         if not fields["breve_descricao"]:
             missing.append("breve descricao")
-        if fields["preco"] <= 0:
-            missing.append("preco de venda")
 
         ploomes_id = ploomes_product.get("Id", "?")
         return (
