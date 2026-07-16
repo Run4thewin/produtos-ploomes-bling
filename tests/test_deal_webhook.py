@@ -564,13 +564,16 @@ class DirectToLogisticsTest(unittest.TestCase):
         )
         service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
 
-        # 1a leitura: previous_stage_id = 110006380 (Analise de Credito, esta na lista
-        # configurada). 2a leitura: nenhum vinculo existente ainda (None).
+        # previous_stage_id ja veio calculado do record_deal_stage_transition (chamado
+        # antes desta funcao, no dispatcher) = 110006380 (Analise de Credito, esta na
+        # lista configurada). Unica leitura de banco aqui e a checagem de vinculo (None).
         with patch(
             "app.services.sync_deal_to_bling_order.get_db_conn",
-            return_value=FakeDbConn(fetchone_results=[(110006380,), None]),
+            return_value=FakeDbConn(fetchone_result=None),
         ):
-            result = service.update_situacao_for_logistics_stage(55)
+            result = service.update_situacao_for_logistics_stage(
+                55, previous_stage_id=110006380
+            )
 
         self.assertEqual(result["action"], "created")
         self.assertEqual(result["bling_order_id"], 12345)
@@ -586,9 +589,11 @@ class DirectToLogisticsTest(unittest.TestCase):
         # previous_stage_id = 110006378 ("Novos Lead's"), fora da lista configurada.
         with patch(
             "app.services.sync_deal_to_bling_order.get_db_conn",
-            return_value=FakeDbConn(fetchone_results=[(110006378,), None]),
+            return_value=FakeDbConn(fetchone_result=None),
         ):
-            result = service.update_situacao_for_logistics_stage(55)
+            result = service.update_situacao_for_logistics_stage(
+                55, previous_stage_id=110006378
+            )
 
         self.assertEqual(result["action"], "skipped")
         self.assertEqual(result["reason"], "pedido_nao_vinculado")
@@ -600,17 +605,52 @@ class DirectToLogisticsTest(unittest.TestCase):
         ploomes = FakePloomesClient(make_deal(stage_id=110008939))
         service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
 
-        # nenhuma linha de rastreamento ainda (primeira vez que vemos esse Deal) e
-        # nenhum vinculo de pedido -- os dois fetchone() retornam None.
+        # nenhuma linha de rastreamento ainda (primeira vez que vemos esse Deal) --
+        # previous_stage_id=None -- e nenhum vinculo de pedido.
         with patch(
             "app.services.sync_deal_to_bling_order.get_db_conn",
-            return_value=FakeDbConn(fetchone_results=[None, None]),
+            return_value=FakeDbConn(fetchone_result=None),
         ):
-            result = service.update_situacao_for_logistics_stage(55)
+            result = service.update_situacao_for_logistics_stage(55, previous_stage_id=None)
 
         self.assertEqual(result["action"], "skipped")
         self.assertEqual(result["reason"], "pedido_nao_vinculado")
         self.assertIsNone(bling.created_payload)
+
+
+class RecordDealStageTransitionTest(unittest.TestCase):
+    def test_returns_previous_value_and_writes_current_stage(self):
+        settings = make_settings()
+        ploomes = FakePloomesClient(make_deal(stage_id=110008939))
+        service = DealToBlingOrderSyncService(settings, bling=FakeBlingClient(), ploomes=ploomes)
+
+        fake_conn = FakeDbConn(fetchone_result=(110006380,))
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=fake_conn,
+        ):
+            previous_stage_id = service.record_deal_stage_transition(55)
+
+        self.assertEqual(previous_stage_id, 110006380)
+        # 1a query = SELECT do estagio anterior, 2a query = UPSERT do estagio atual.
+        self.assertEqual(len(fake_conn.cursor_obj.executed), 2)
+        insert_sql, insert_params = fake_conn.cursor_obj.executed[1]
+        self.assertIn("INSERT INTO ploomes_deal_stage_tracking", insert_sql)
+        self.assertEqual(insert_params, (55, 110008939))
+        self.assertTrue(fake_conn.committed)
+
+    def test_returns_none_when_deal_never_seen_before(self):
+        settings = make_settings()
+        ploomes = FakePloomesClient(make_deal(stage_id=110006380))
+        service = DealToBlingOrderSyncService(settings, bling=FakeBlingClient(), ploomes=ploomes)
+
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_result=None),
+        ):
+            previous_stage_id = service.record_deal_stage_transition(55)
+
+        self.assertIsNone(previous_stage_id)
 
 
 if __name__ == "__main__":

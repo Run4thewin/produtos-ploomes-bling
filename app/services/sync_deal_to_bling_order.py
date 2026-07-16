@@ -330,7 +330,18 @@ class DealToBlingOrderSyncService:
                 "[PURCHASE_FLOW] Falha ao gravar bling_order_links | deal_id=%s | %s", deal_id, exc
             )
 
-    def update_situacao_for_logistics_stage(self, deal_id: int | str) -> dict[str, Any]:
+    def record_deal_stage_transition(self, deal_id: int | str) -> int | None:
+        # Chamado uma vez por webhook, ANTES de qualquer regra de estagio, para que
+        # toda transicao do Deal fique registrada -- mesmo quando nenhuma regra bate
+        # no estagio atual. E o que permite detectar, mais tarde, um Deal que pulou
+        # direto de um estagio anterior para Logistica sem passar por Solicitacao de
+        # Compra (ver _find_direct_to_logistics_rule).
+        deal = self.ploomes.get_deal_by_id(deal_id)
+        return self._record_and_get_previous_stage(deal["Id"], deal.get("StageId"))
+
+    def update_situacao_for_logistics_stage(
+        self, deal_id: int | str, previous_stage_id: int | None = None
+    ) -> dict[str, Any]:
         deal = self.ploomes.get_deal_by_id(deal_id)
         rule = self._find_logistics_rule(deal)
         if not rule:
@@ -339,8 +350,6 @@ class DealToBlingOrderSyncService:
                 "reason": "stage_nao_configurado",
                 "deal_id": deal.get("Id"),
             }
-
-        previous_stage_id = self._record_and_get_previous_stage(deal["Id"], deal.get("StageId"))
 
         link = self._get_order_link(deal["Id"])
         if not link or not link.get("bling_pedido_venda_id"):

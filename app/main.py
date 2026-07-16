@@ -320,6 +320,11 @@ async def ploomes_deal_webhook(
 
     try:
         service = DealToBlingOrderSyncService(settings)
+        # Registra a transicao de estagio incondicionalmente, antes de qualquer regra,
+        # para que o rastreamento proprio (ploomes_deal_stage_tracking) capture o
+        # estagio anterior real mesmo quando o Deal nao bate com nenhuma regra abaixo.
+        previous_stage_id = service.record_deal_stage_transition(parsed["deal_id"])
+
         # Tenta, em ordem, cada regra que pode se aplicar ao estagio atual do Deal:
         # 1) regra legada (ploomes_deal_stage_rules, ex: pipeline Portal) -- so cria pedido de venda.
         # 2) regra nova (ploomes_deal_purchase_trigger_stage_rules) -- cria pedido de venda + compra.
@@ -329,7 +334,9 @@ async def ploomes_deal_webhook(
         if result.get("action") == "skipped":
             result = service.create_purchase_flow_from_deal(parsed["deal_id"])
         if result.get("action") == "skipped":
-            result = service.update_situacao_for_logistics_stage(parsed["deal_id"])
+            result = service.update_situacao_for_logistics_stage(
+                parsed["deal_id"], previous_stage_id=previous_stage_id
+            )
 
         logger.info(
             "Webhook Ploomes Deal processado | deal_id=%s result_action=%s elapsed_ms=%s",
