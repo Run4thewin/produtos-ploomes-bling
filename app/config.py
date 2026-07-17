@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     ploomes_deal_freight_type_field: str = "deal_7BC53E9B-AF8C-408F-A1CD-8B2C753C77DD"
     ploomes_deal_freight_value_field: str = "deal_59F2936E-3DC3-4621-A019-578D1AA2D1DA"
     bling_payment_methods: str = (
+        # O Bling nao tem forma "a vista" -- mapeada para PIX (decisao Gabriel 2026-07-16).
+        "A VISTA:4165733,"
         "Boleto - Bling Conta:4165732,"
         "BOLETO:5584894,"
         "CARTAO DE CREDITO:1366426,"
@@ -74,11 +76,18 @@ class Settings(BaseSettings):
     ploomes_deal_purchase_trigger_stage_rules: str = "110001615:110006382:110006382"
     # Estagio que dispara atualizacao de situacao no Bling, sem criar pedido novo (pipeline_id:stage_id)
     ploomes_deal_logistics_stage_rules: str = "110001615:110008939"
-    # Ids de situacao no Bling para os pedidos de venda (TBD -- bloqueado por escopo OAuth insuficiente, ver plano)
-    bling_situacao_em_processo_compra: int = 0
-    bling_situacao_pronto_faturar: int = 0
+    # Ids de situacao no Bling para os pedidos de venda (validados na conta real 2026-07-16).
+    # O pedido nasce "Em aberto" e o codigo muda a situacao via PATCH depois -- o Bling nao
+    # aceita criar ja na situacao final (nao ha transicao definida "Em aberto" -> essas).
+    bling_situacao_em_processo_compra: int = 820624  # "Em Processo de Compra"
+    bling_situacao_pronto_faturar: int = 820625  # "Pronto Para Faturar"
     # Novo campo customizado no Deal para guardar o id do pedido de compra gerado (TBD -- criar no Ploomes)
     ploomes_deal_purchase_order_id_field: str = ""
+    # Campo customizado (texto) no Deal para guardar o id do pedido de VENDA do Bling.
+    # Quando configurado, vira a fonte de verdade do vinculo Deal->pedido (dispensa Postgres);
+    # vazio = comportamento legado, le/grava em bling_order_links. Guardar como texto (id cru)
+    # porque o id do Bling estoura inteiro de 32 bits.
+    ploomes_deal_sales_order_id_field: str = ""
     # Deal pulando direto de um desses estagios (Orcamento/Analise de Credito/Analise
     # aprovada) para Logistica, sem passar por "Gerar pedido de venda" -- gera pedido
     # de venda ali mesmo, ja com situacao pronto_faturar. Formato: pipeline_id:origem1,origem2,...:destino

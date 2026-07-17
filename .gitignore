@@ -17,3 +17,5 @@ build/
 .vscode/
 *.log
 logs/
+# saida do servidor local de teste (testar_funil_teste.ps1)
+logs_teste_funil.txt

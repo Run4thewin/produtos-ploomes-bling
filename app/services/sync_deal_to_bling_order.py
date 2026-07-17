@@ -295,6 +295,13 @@ class DealToBlingOrderSyncService:
                     "IntegerValue": purchase_order_id,
                 }
             )
+        if self.settings.ploomes_deal_sales_order_id_field:
+            other_properties.append(
+                {
+                    "FieldKey": self.settings.ploomes_deal_sales_order_id_field,
+                    "StringValue": str(order_id),
+                }
+            )
         self.ploomes.update_deal(
             deal["Id"],
             {
@@ -306,6 +313,9 @@ class DealToBlingOrderSyncService:
     def _save_order_link(
         self, deal_id: int | str, sales_order_id: int, purchase_order_id: int | None
     ) -> None:
+        # Com o campo do Deal configurado, o vinculo vive no Ploomes -- nao usa Postgres.
+        if self.settings.ploomes_deal_sales_order_id_field:
+            return
         try:
             conn = get_db_conn(self.settings)
             try:
@@ -351,7 +361,7 @@ class DealToBlingOrderSyncService:
                 "deal_id": deal.get("Id"),
             }
 
-        link = self._get_order_link(deal["Id"])
+        link = self._get_order_link(deal)
         if not link or not link.get("bling_pedido_venda_id"):
             direct_rule = self._find_direct_to_logistics_rule(deal)
             if direct_rule and previous_stage_id in direct_rule.source_stage_ids:
@@ -453,17 +463,20 @@ class DealToBlingOrderSyncService:
             f"Pedido Bling {order_number}: "
             f"https://www.bling.com.br/vendas.php#edit/{sales_order_id}"
         )
-        self.ploomes.update_deal(
-            deal["Id"],
+        other_properties = [
             {
-                "OtherProperties": [
-                    {
-                        "FieldKey": self.settings.ploomes_deal_order_field,
-                        "StringValue": order_reference,
-                    }
-                ]
-            },
-        )
+                "FieldKey": self.settings.ploomes_deal_order_field,
+                "StringValue": order_reference,
+            }
+        ]
+        if self.settings.ploomes_deal_sales_order_id_field:
+            other_properties.append(
+                {
+                    "FieldKey": self.settings.ploomes_deal_sales_order_id_field,
+                    "StringValue": str(sales_order_id),
+                }
+            )
+        self.ploomes.update_deal(deal["Id"], {"OtherProperties": other_properties})
 
         logger.info(
             "[LOGISTICS_DIRECT] Pedido de venda %s criado direto para Logistica a partir do Deal %s",
@@ -515,7 +528,23 @@ class DealToBlingOrderSyncService:
             )
             return None
 
-    def _get_order_link(self, deal_id: int | str) -> dict[str, Any] | None:
+    def _get_order_link(self, deal: dict[str, Any]) -> dict[str, Any] | None:
+        # Fonte de verdade preferencial: campo do Deal no Ploomes (dispensa Postgres).
+        field = self.settings.ploomes_deal_sales_order_id_field
+        if field:
+            raw = get_other_property(deal, field)
+            if raw not in (None, ""):
+                try:
+                    return {"bling_pedido_venda_id": int(raw), "bling_pedido_compra_id": None}
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "[LOGISTICS] Campo do pedido no Deal com valor invalido | deal_id=%s | %r",
+                        deal.get("Id"),
+                        raw,
+                    )
+
+        # Fallback legado: bling_order_links (Postgres).
+        deal_id = deal.get("Id")
         try:
             conn = get_db_conn(self.settings)
             try:
@@ -539,6 +568,9 @@ class DealToBlingOrderSyncService:
         return {"bling_pedido_venda_id": row[0], "bling_pedido_compra_id": row[1]}
 
     def _update_order_link_situacao(self, deal_id: int | str, situacao_id: int) -> None:
+        # Com o campo do Deal configurado, o vinculo vive no Ploomes -- nao usa Postgres.
+        if self.settings.ploomes_deal_sales_order_id_field:
+            return
         try:
             conn = get_db_conn(self.settings)
             try:

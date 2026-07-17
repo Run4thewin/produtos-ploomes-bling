@@ -448,7 +448,8 @@ class PurchaseFlowTest(unittest.TestCase):
         self.assertEqual(result["bling_order_id"], 12345)
         self.assertIsNone(result["bling_purchase_order_id"])
         self.assertEqual(ploomes.updated_deals[0][1]["StageId"], 110006382)
-        self.assertEqual(bling.situacao_updates, [])  # bling_situacao_em_processo_compra=0 por padrao
+        # Por padrao o pedido nasce "Em aberto" e avanca para "Em Processo de Compra".
+        self.assertEqual(bling.situacao_updates, [(12345, 820624)])
 
     def test_skips_when_stage_does_not_match_trigger(self):
         settings = make_settings(**self.TRIGGER_SETTINGS)
@@ -477,6 +478,26 @@ class PurchaseFlowTest(unittest.TestCase):
             service.create_purchase_flow_from_deal(55)
 
         self.assertEqual(bling.situacao_updates, [(12345, 99)])
+
+    def test_writes_sales_order_id_field_when_configured(self):
+        settings = make_settings(
+            **self.TRIGGER_SETTINGS,
+            ploomes_deal_sales_order_id_field="deal_sales_order_id",
+        )
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
+        ploomes = FakePloomesClient(
+            make_deal(stage_id=110006382),
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        with patch("app.services.sync_deal_to_bling_order.get_db_conn", return_value=FakeDbConn()):
+            service.create_purchase_flow_from_deal(55)
+
+        props = ploomes.updated_deals[0][1]["OtherProperties"]
+        field_entry = next(p for p in props if p["FieldKey"] == "deal_sales_order_id")
+        self.assertEqual(field_entry["StringValue"], "12345")
 
 
 class LogisticsStageTest(unittest.TestCase):
@@ -531,7 +552,7 @@ class LogisticsStageTest(unittest.TestCase):
         self.assertEqual(result["reason"], "stage_nao_configurado")
 
     def test_skips_when_situacao_not_configured(self):
-        settings = make_settings(**self.LOGISTICS_SETTINGS)  # bling_situacao_pronto_faturar=0 (default)
+        settings = make_settings(**self.LOGISTICS_SETTINGS, bling_situacao_pronto_faturar=0)
         bling = FakeBlingClient()
         ploomes = FakePloomesClient(make_deal(stage_id=110008939))
         service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
@@ -545,6 +566,31 @@ class LogisticsStageTest(unittest.TestCase):
         self.assertEqual(result["action"], "skipped")
         self.assertEqual(result["reason"], "situacao_nao_configurada")
         self.assertEqual(bling.situacao_updates, [])
+
+    def test_reads_link_from_ploomes_field(self):
+        settings = make_settings(
+            **self.LOGISTICS_SETTINGS,
+            bling_situacao_pronto_faturar=42,
+            ploomes_deal_sales_order_id_field="deal_sales_order_id",
+        )
+        deal = make_deal(stage_id=110008939)
+        deal["OtherProperties"].append(
+            {"FieldKey": "deal_sales_order_id", "StringValue": "26351829953"}
+        )
+        bling = FakeBlingClient()
+        ploomes = FakePloomesClient(deal)
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        # DB devolve None: se o codigo caisse no fallback do Postgres nao acharia vinculo.
+        # Achar o pedido 26351829953 prova que veio do campo do Deal no Ploomes.
+        with patch(
+            "app.services.sync_deal_to_bling_order.get_db_conn",
+            return_value=FakeDbConn(fetchone_result=None),
+        ):
+            result = service.update_situacao_for_logistics_stage(55)
+
+        self.assertEqual(result["action"], "situacao_atualizada")
+        self.assertEqual(bling.situacao_updates, [(26351829953, 42)])
 
 
 class DirectToLogisticsTest(unittest.TestCase):
