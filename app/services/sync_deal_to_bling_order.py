@@ -224,6 +224,25 @@ class DealToBlingOrderSyncService:
                 "stage_id": deal.get("StageId"),
             }
 
+        # O Ploomes dispara o webhook varias vezes para a mesma mudanca, e o Deal
+        # permanece no estagio-gatilho (origem = destino). Sem esta checagem cada
+        # webhook tenta criar outro pedido: o Bling recusa a duplicata ("informacoes
+        # identicas a ultima venda salva") e o Deal acaba no estagio de erro mesmo
+        # tendo gerado o pedido com sucesso na primeira chamada.
+        existing = self._get_order_link(deal)
+        if existing and existing.get("bling_pedido_venda_id"):
+            logger.info(
+                "[PURCHASE_FLOW] SKIP deal_id=%s | pedido %s ja vinculado",
+                deal.get("Id"),
+                existing["bling_pedido_venda_id"],
+            )
+            return {
+                "action": "skipped",
+                "reason": "pedido_ja_vinculado",
+                "deal_id": deal.get("Id"),
+                "bling_order_id": existing["bling_pedido_venda_id"],
+            }
+
         quote = self.ploomes.get_latest_quote_by_deal(deal["Id"])
         if not quote:
             raise DealOrderValidationError("Deal sem quote/orcamento para gerar pedido")

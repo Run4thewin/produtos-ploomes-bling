@@ -479,6 +479,34 @@ class PurchaseFlowTest(unittest.TestCase):
 
         self.assertEqual(bling.situacao_updates, [(12345, 99)])
 
+    def test_skips_when_order_already_linked(self):
+        # O Ploomes dispara o webhook varias vezes para a mesma mudanca e o Deal
+        # continua no estagio-gatilho. Sem idempotencia, o 2o webhook tentava criar
+        # outro pedido -- o Bling recusava e o Deal ia para o estagio de erro.
+        settings = make_settings(
+            **self.TRIGGER_SETTINGS,
+            ploomes_deal_sales_order_id_field="deal_sales_order_id",
+        )
+        deal = make_deal(stage_id=110006382)
+        deal["OtherProperties"].append(
+            {"FieldKey": "deal_sales_order_id", "StringValue": "26358391605"}
+        )
+        bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
+        ploomes = FakePloomesClient(
+            deal,
+            make_quote(),
+            products={999: make_ploomes_product(settings)},
+        )
+        service = DealToBlingOrderSyncService(settings, bling=bling, ploomes=ploomes)
+
+        result = service.create_purchase_flow_from_deal(55)
+
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["reason"], "pedido_ja_vinculado")
+        self.assertEqual(result["bling_order_id"], 26358391605)
+        self.assertIsNone(bling.created_payload)  # nao criou pedido duplicado
+        self.assertEqual(ploomes.updated_deals, [])  # nao mexeu no Deal
+
     def test_writes_sales_order_id_field_when_configured(self):
         settings = make_settings(
             **self.TRIGGER_SETTINGS,
