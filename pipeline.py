@@ -21,5 +21,8 @@ def run(cmd: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    run([sys.executable, "blng_fetcher/main.py", "--entity", "all"])
+    # incremental: usa watermark/janela por entidade (bling_sync_state);
+    # --pages 999 nao e' custo fixo — o filtro incremental reduz as paginas
+    run([sys.executable, "blng_fetcher/main.py",
+         "--entity", "all", "--mode", "incremental", "--pages", "999"])
     run([sys.executable, "scripts/sync_to_sheets.py"])
