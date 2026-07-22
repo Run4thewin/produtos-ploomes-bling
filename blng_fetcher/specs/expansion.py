@@ -269,6 +269,7 @@ EMPRESAS = EntitySpec(
     name="empresas", endpoint="empresas/me/dados-basicos", table="bling_empresas",
     small_config=True, refresh_hours=24,
     singleton=True,
+    id_sql_type="text",                   # id vem como hash string, nao bigint
     fields=(
         FieldSpec("nome", "nome"),
         FieldSpec("cnpj", "cnpj"),

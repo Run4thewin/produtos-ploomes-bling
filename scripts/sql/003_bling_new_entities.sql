@@ -265,7 +265,7 @@ GRANT SELECT, INSERT, UPDATE ON bling_campos_customizados_modulos TO api_user;
 
 -- empresas (empresas/me/dados-basicos)
 CREATE TABLE IF NOT EXISTS bling_empresas (
-    id                bigint PRIMARY KEY,
+    id                text PRIMARY KEY,
     nome                       text,
     cnpj                       text,
     email                      text,

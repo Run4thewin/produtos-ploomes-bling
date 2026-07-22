@@ -109,6 +109,7 @@ class EntitySpec:
     list_params: dict = field(default_factory=dict)
     singleton: bool = False                   # resposta "data" e' um dict unico
     id_path: str = "id"                       # caminho do id no item ("produto.id")
+    id_sql_type: str = "bigint"               # tipo do id/PK (empresas usa hash text)
     conflict_columns: tuple[str, ...] = ("id",)
     id_batch_source: str | None = None        # SQL que produz ids p/ iterar
     id_batch_param: str | None = None         # "idsProdutos[]"

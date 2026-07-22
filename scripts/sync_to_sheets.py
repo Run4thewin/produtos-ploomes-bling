@@ -3,12 +3,19 @@ scripts/sync_to_sheets.py
 Sincroniza dados do Bling para o Google Sheets — uma aba por entidade.
 
 Abas geradas:
-    Pedidos          → bling_orders × bling_contacts
-    NF-e             → bling_nfe × bling_contacts
-    Contas Receber   → bling_contas_receber × bling_contacts
-    Contas Pagar     → bling_contas_pagar × bling_contacts
-    Contatos         → bling_contacts
-    _log             → histórico de execuções
+    Pedidos             → bling_orders × bling_contacts
+    NF-e                → bling_nfe × bling_contacts
+    Contas Receber      → bling_contas_receber × bling_contacts
+    Contas Pagar        → bling_contas_pagar × bling_contacts
+    Contatos            → bling_contacts
+    Pedidos de Compra   → bling_pedidos_compras × bling_contacts
+    Propostas Comerciais→ bling_propostas_comerciais × bling_contacts × bling_vendedores
+    Auditoria           → bling_change_history (ultimos 90 dias)
+    + 12 abas de cadastro/config geradas das specs (ver CONFIG_TABS):
+      Depósitos, Vendedores, Categorias de Produtos, Categorias Financeiras,
+      Grupos de Produtos, Tipos de Contato, Formas de Pagamento,
+      Contas Contábeis, Canais de Venda, Campos Customizados, Empresa, NFC-e
+    _log                → histórico de execuções
 
 .env necessário:
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
@@ -318,7 +325,178 @@ ENTITIES: list[Entity] = [
             ORDER BY c.name
         """,
     ),
+    Entity(
+        key="compras",
+        tab="Pedidos de Compra",
+        headers=[
+            "ID Bling", "Nº Pedido", "Status", "Status Raw",
+            "Data", "Data Prevista", "Total Produtos (R$)", "Total (R$)",
+            "Desconto", "ICMS", "IPI", "Frete", "Transportador",
+            "Ordem de Compra", "Observações",
+            "Fornecedor ID", "Nome Fornecedor", "Documento",
+            "E-mail", "Telefone", "Cidade", "UF",
+            "Criado em", "Atualizado em",
+        ],
+        sql="""
+            SELECT
+                pc.id::text,
+                pc.numero::text,
+                CASE pc.situacao_valor
+                    WHEN 0 THEN 'Em Aberto'
+                    WHEN 1 THEN 'Atendido'
+                    WHEN 2 THEN 'Cancelado'
+                    WHEN 3 THEN 'Em Andamento'
+                    ELSE pc.situacao_valor::text
+                END,
+                pc.situacao_valor::text,
+                pc.data,
+                pc.data_prevista,
+                pc.total_produtos,
+                pc.total,
+                pc.desconto_valor,
+                pc.tributacao_total_icms,
+                pc.tributacao_total_ipi,
+                pc.transporte_frete,
+                NULLIF(pc.transporte_transportador, ''),
+                NULLIF(pc.ordem_compra, ''),
+                NULLIF(pc.observacoes, ''),
+                pc.fornecedor_id::text,
+                c.name,
+                c.document,
+                c.email,
+                c.phone,
+                c.city,
+                c.state,
+                pc.created_at,
+                pc.updated_at
+            FROM bling_pedidos_compras pc
+            LEFT JOIN bling_contacts c ON c.id = pc.fornecedor_id
+            WHERE pc.deleted_at IS NULL
+            ORDER BY pc.data DESC NULLS LAST
+        """,
+    ),
+
+    Entity(
+        key="propostas",
+        tab="Propostas Comerciais",
+        headers=[
+            "ID Bling", "Nº Proposta", "Situação",
+            "Data", "Próximo Contato", "Total (R$)", "Total Produtos (R$)",
+            "Desconto", "Outras Despesas", "Prazo Entrega", "A/C de",
+            "Contato ID", "Nome Contato", "Documento",
+            "E-mail", "Telefone", "Cidade", "UF",
+            "Vendedor", "Observações",
+            "Criado em", "Atualizado em",
+        ],
+        sql="""
+            SELECT
+                p.id::text,
+                p.numero::text,
+                p.situacao,
+                p.data,
+                p.data_proximo_contato,
+                p.total,
+                p.total_produtos,
+                p.desconto,
+                p.outras_despesas,
+                NULLIF(p.prazo_entrega, ''),
+                NULLIF(p.aos_cuidados_de, ''),
+                p.contato_id::text,
+                c.name,
+                c.document,
+                c.email,
+                c.phone,
+                c.city,
+                c.state,
+                v.contato_nome,
+                NULLIF(p.observacoes, ''),
+                p.created_at,
+                p.updated_at
+            FROM bling_propostas_comerciais p
+            LEFT JOIN bling_contacts   c ON c.id = p.contato_id
+            LEFT JOIN bling_vendedores v ON v.id = p.vendedor_id
+            WHERE p.deleted_at IS NULL
+            ORDER BY p.data DESC NULLS LAST
+        """,
+    ),
+
+    # Auditoria: o historico campo a campo gravado pelo fetcher. Limitado aos
+    # ultimos 90 dias para a aba nao crescer sem limite (a tabela e' a fonte).
+    Entity(
+        key="auditoria",
+        tab="Auditoria",
+        headers=[
+            "Data/Hora", "Entidade", "ID Registro", "Operação",
+            "Campo", "Valor Anterior", "Valor Novo", "Execução",
+        ],
+        sql="""
+            SELECT
+                h.changed_at,
+                h.entity,
+                h.entity_id,
+                CASE h.op
+                    WHEN 'I' THEN 'Criado'
+                    WHEN 'U' THEN 'Alterado'
+                    WHEN 'D' THEN 'Removido'
+                    WHEN 'R' THEN 'Reapareceu'
+                    ELSE h.op
+                END,
+                h.field,
+                left(h.old_value, 500),
+                left(h.new_value, 500),
+                h.run_id::text
+            FROM bling_change_history h
+            WHERE h.changed_at >= now() - interval '90 days'
+            ORDER BY h.changed_at DESC
+            LIMIT 50000
+        """,
+    ),
 ]
+
+# ---------------------------------------------------------------------------
+# Entidades de cadastro/config — abas geradas a partir das specs do fetcher
+# (blng_fetcher/specs), em vez de SQL escrito a mao. Sem traducao de status
+# nem joins: sao tabelas de referencia simples (id + colunas escalares).
+# ---------------------------------------------------------------------------
+
+# nome da spec -> nome de aba em portugues
+CONFIG_TABS: dict[str, str] = {
+    "depositos": "Depósitos",
+    "vendedores": "Vendedores",
+    "categorias_produtos": "Categorias de Produtos",
+    "categorias_receitas_despesas": "Categorias Financeiras",
+    "grupos_produtos": "Grupos de Produtos",
+    "contatos_tipos": "Tipos de Contato",
+    "formas_pagamentos": "Formas de Pagamento",
+    "contas_contabeis": "Contas Contábeis",
+    "canais_venda": "Canais de Venda",
+    "campos_customizados_modulos": "Campos Customizados",
+    "empresas": "Empresa",
+    "nfce": "NFC-e",
+    # estoques_saldos fica de fora: carga pulada a pedido, tabela vazia.
+}
+
+
+def _humanize(column: str) -> str:
+    words = [("ID" if w == "id" else w.capitalize()) for w in column.split("_")]
+    return " ".join(words)
+
+
+def _generic_config_entity(spec_name: str, tab: str) -> Entity:
+    from blng_fetcher.specs import SPECS  # import tardio: evita custo p/ quem so usa --dry-run
+    spec = SPECS[spec_name]
+    columns = [f.column for f in spec.fields]
+    headers = ["ID Bling"] + [_humanize(c) for c in columns]
+    select_cols = ["id::text", *columns]
+    sql = (
+        f"SELECT {', '.join(select_cols)} FROM {spec.table} "
+        f"WHERE deleted_at IS NULL ORDER BY id"
+    )
+    return Entity(key=spec_name, tab=tab, headers=headers, sql=sql)
+
+
+for _spec_name, _tab in CONFIG_TABS.items():
+    ENTITIES.append(_generic_config_entity(_spec_name, _tab))
 
 ENTITY_MAP = {e.key: e for e in ENTITIES}
 
@@ -339,14 +517,38 @@ def _fmt(v):
     return v
 
 
+DB_CONNECT_RETRY_DELAYS = (2.0, 5.0, 10.0)
+
+
+def _connect():
+    """Conecta com retry — timeouts transitorios de rede nao podem derrubar
+    o pipeline horario inteiro."""
+    last_error = None
+    for delay in (0.0, *DB_CONNECT_RETRY_DELAYS):
+        if delay:
+            logger.warning("Falha ao conectar no banco (%s); tentando de novo em %.0fs...",
+                           type(last_error).__name__, delay)
+            time.sleep(delay)
+        try:
+            return psycopg2.connect(
+                host=os.environ["DB_HOST"],
+                port=int(os.environ.get("DB_PORT", 5432)),
+                dbname=os.environ["DB_NAME"],
+                user=os.environ["DB_USER"],
+                password=os.environ["DB_PASSWORD"],
+                connect_timeout=15,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
+            )
+        except psycopg2.OperationalError as exc:
+            last_error = exc
+    raise last_error
+
+
 def _fetch(sql: str) -> list[list]:
-    conn = psycopg2.connect(
-        host=os.environ["DB_HOST"],
-        port=int(os.environ.get("DB_PORT", 5432)),
-        dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
-    )
+    conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(sql)
@@ -506,7 +708,7 @@ if __name__ == "__main__":
         "--entity",
         choices=list(ENTITY_MAP.keys()) + ["all"],
         default="all",
-        help="Entidade a sincronizar: all | pedidos | nfe | receber | pagar | contatos (default: all)",
+        help="Entidade a sincronizar: all | " + " | ".join(ENTITY_MAP) + " (default: all)",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

@@ -1,0 +1,52 @@
+# Build + redeploy do Cloud Run JOB bling-pipeline (fetcher Bling -> Postgres).
+# Roda 100% no Cloud Build — NAO precisa de Docker na maquina, so o gcloud CLI.
+#
+# Uso (da raiz do projeto):
+#   gcloud builds submit --config cloudbuild.pipeline.yaml --project portal-cmc-442413
+#
+# Diferente do cloudbuild.yaml (que faz deploy do SERVICE de webhooks
+# ploomes-bling-sync), este atualiza o JOB bling-pipeline. As env vars e
+# secrets do Job ja estao configurados; aqui so trocamos a imagem.
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: bling-pipeline
+  _JOB: bling-pipeline
+
+steps:
+  # 1. build da imagem no Cloud Build (usa Dockerfile.pipeline)
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.pipeline
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_JOB}:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_JOB}:latest
+      - .
+
+  # 2. push
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_JOB}
+
+  # 3. update do Job existente (so troca a imagem; env/secrets ja setados)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - update
+      - ${_JOB}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_JOB}:$COMMIT_SHA
+      - --region=${_REGION}
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_JOB}:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_JOB}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY

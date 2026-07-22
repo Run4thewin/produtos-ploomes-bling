@@ -28,10 +28,36 @@ class SyncState:
 
 
 def acquire_lock(conn) -> bool:
-    """Advisory lock p/ evitar execucoes horarias sobrepostas."""
+    """Advisory lock (session-level) p/ evitar execucoes sobrepostas.
+
+    Sobrevive a commits — so cai no unlock explicito ou no fim da sessao.
+    """
     with conn.cursor() as cur:
         cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (ADVISORY_LOCK_KEY,))
         return bool(cur.fetchone()[0])
+
+
+def describe_lock_holder(conn) -> str:
+    """Descreve quem segura o lock — sem isso, um lock presa vira um job
+    'que nao roda' sem explicacao nenhuma nos logs."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.pid, a.state, now() - a.state_change, now() - a.backend_start
+                FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE l.locktype = 'advisory'
+                """
+            )
+            rows = cur.fetchall()
+        if not rows:
+            return "nenhuma sessao encontrada (lock pode ter acabado de sair)"
+        return "; ".join(
+            f"pid={pid} state={state} parado_ha={idle} sessao_ha={age}"
+            for pid, state, idle, age in rows
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostico nao pode quebrar o job
+        return f"falha ao inspecionar: {exc}"
 
 
 def release_lock(conn) -> None:

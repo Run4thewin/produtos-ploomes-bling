@@ -27,7 +27,19 @@ from .specs.base import EntitySpec, _dig, _now
 logger = logging.getLogger(__name__)
 
 FETCH_PAGE_TRANSIENT_STATUS = {502, 503, 504}
-FETCH_PAGE_RETRY_DELAYS = (2.0, 5.0, 10.0)
+FETCH_PAGE_RETRY_DELAYS = (2.0, 5.0, 10.0, 20.0)
+
+# Falhas de rede/transporte (DNS, timeout de conexao, conexao derrubada no meio).
+# Sem isso, uma instabilidade momentanea aborta a carga inteira da entidade.
+TRANSIENT_NETWORK_ERRORS = (
+    httpx.ConnectTimeout,
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
+    httpx.PoolTimeout,
+)
 
 
 @dataclass
@@ -40,6 +52,7 @@ class LoadStats:
     unchanged: int = 0
     history_rows: int = 0
     detail_requests: int = 0
+    detail_failures: int = 0   # detalhe indisponivel -> registro sera retentado
     status: str = "ok"          # ok | quota | error | partial
     last_page: int | None = None
     completed: bool = False      # percorreu ate a ultima pagina sem erro
@@ -53,15 +66,20 @@ class LoadStats:
 def fetch_page(bling: BlingClient, endpoint: str, page: int, page_size: int,
                extra_params: dict | None = None) -> list[dict]:
     params = {"pagina": page, "limite": page_size, **(extra_params or {})}
-    last_error: httpx.HTTPStatusError | None = None
+    last_error: Exception | None = None
     for delay in (0.0, *FETCH_PAGE_RETRY_DELAYS):
         if delay:
             logger.warning(
-                "Erro transitorio ao buscar pagina %s de %s; tentando de novo em %.0fs...",
-                page, endpoint, delay,
+                "Erro transitorio ao buscar pagina %s de %s (%s); "
+                "tentando de novo em %.0fs...",
+                page, endpoint, type(last_error).__name__, delay,
             )
             time.sleep(delay)
-        response = bling._request("GET", endpoint, params=params)
+        try:
+            response = bling._request("GET", endpoint, params=params)
+        except TRANSIENT_NETWORK_ERRORS as exc:
+            last_error = exc
+            continue
         if response.status_code in FETCH_PAGE_TRANSIENT_STATUS:
             try:
                 bling._raise_bling_error(response)
@@ -77,15 +95,39 @@ def fetch_page(bling: BlingClient, endpoint: str, page: int, page_size: int,
 
 
 def fetch_detail(bling: BlingClient, spec: EntitySpec, item_id) -> dict | None:
-    try:
-        response = bling._request("GET", spec.detail_endpoint.format(id=item_id))
-        bling._raise_bling_error(response)
-        return response.json().get("data")
-    except DailyQuotaExceeded:
-        raise
-    except Exception as exc:  # noqa: BLE001 - detalhe com falha nao aborta a pagina
-        logger.warning("[%s] Falha ao buscar detalhe %s: %s", spec.name, item_id, exc)
-        return None
+    path = spec.detail_endpoint.format(id=item_id)
+    last_error: Exception | None = None
+    for delay in (0.0, *FETCH_PAGE_RETRY_DELAYS):
+        if delay:
+            logger.warning(
+                "[%s] Erro transitorio no detalhe %s (%s); tentando de novo em %.0fs...",
+                spec.name, item_id, type(last_error).__name__, delay,
+            )
+            time.sleep(delay)
+        try:
+            response = bling._request("GET", path)
+            if response.status_code in FETCH_PAGE_TRANSIENT_STATUS:
+                bling._raise_bling_error(response)
+            bling._raise_bling_error(response)
+            return response.json().get("data")
+        except DailyQuotaExceeded:
+            raise
+        except TRANSIENT_NETWORK_ERRORS as exc:
+            last_error = exc
+            continue
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code in FETCH_PAGE_TRANSIENT_STATUS:
+                last_error = exc
+                continue
+            logger.warning("[%s] Falha ao buscar detalhe %s: %s", spec.name, item_id, exc)
+            return None
+        except Exception as exc:  # noqa: BLE001 - detalhe com falha nao aborta a pagina
+            logger.warning("[%s] Falha ao buscar detalhe %s: %s", spec.name, item_id, exc)
+            return None
+    # esgotou as tentativas: nao aborta a pagina, segue com o item da listagem
+    logger.warning("[%s] Detalhe %s falhou apos retries: %s",
+                   spec.name, item_id, last_error)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +321,10 @@ def load_entity(
             spec.name, processed["inserted"], processed["updated"],
             processed["unchanged"], processed["history"],
         )
-        if len(items) < page_size and not spec.singleton:
+        # singleton (ex.: empresas/me/dados-basicos) sempre devolve o mesmo
+        # unico registro — nao existe "pagina 2"; sem este corte, o loop
+        # rebuscaria o mesmo item ate max_pages (999 em producao).
+        if spec.singleton or len(items) < page_size:
             logger.info("[%s] Ultima pagina atingida.", spec.name)
             stats.completed = True
             break
@@ -287,8 +332,6 @@ def load_entity(
         # esgotou max_pages sem chegar na ultima pagina
         stats.status = "partial"
 
-    if spec.singleton:
-        stats.completed = True
     return stats
 
 
@@ -296,6 +339,11 @@ def _process_page(bling, conn, spec: EntitySpec, items: list[dict],
                   run_id: str, detail_when: str, stats: LoadStats) -> dict:
     hashes = {_item_id(spec, item): compute_source_hash(item) for item in items}
     existing = select_existing(conn, spec, [i for i in hashes if i is not None])
+    # Solta a transacao ANTES das chamadas HTTP de detalhe. Sem isso, uma pagina
+    # de 100 registros mantem a transacao aberta por dezenas de segundos (minutos,
+    # se a rede engasgar) -> sessao "idle in transaction" segurando o advisory
+    # lock, que bloqueia as proximas execucoes.
+    conn.commit()
 
     new_items, changed_items = [], []
     for item in items:
@@ -313,13 +361,20 @@ def _process_page(bling, conn, spec: EntitySpec, items: list[dict],
     prepared: list[dict] = []
     events: list[tuple] = []
 
-    def resolve(item: dict) -> dict:
-        """Item da listagem -> payload completo (detalhe quando configurado)."""
+    def resolve(item: dict) -> tuple[dict, bool]:
+        """Item da listagem -> (payload, detalhe_ok).
+
+        detalhe_ok=False significa que a entidade exige detalhe mas ele falhou;
+        o chamador NAO deve gravar source_hash (nem sobrescrever dados bons),
+        para que a proxima execucao tente de novo.
+        """
         if spec.detail_endpoint and detail_when in ("changed", "always"):
             detail = fetch_detail(bling, spec, _item_id(spec, item))
             stats.detail_requests += 1
-            return detail if detail else item
-        return item
+            if not detail:
+                return item, False
+            return detail, True
+        return item, True
 
     if detail_when == "always":
         # inalterados tambem sao re-buscados (usado no full sweep semanal)
@@ -331,7 +386,7 @@ def _process_page(bling, conn, spec: EntitySpec, items: list[dict],
             stats.unchanged -= 1
 
     for item in new_items:
-        payload = resolve(item)
+        payload, detail_ok = resolve(item)
         item_id = _item_id(spec, item)
         values = spec.extract_row(payload)
         created_at = (spec.created_at_field.extract(payload)
@@ -339,14 +394,25 @@ def _process_page(bling, conn, spec: EntitySpec, items: list[dict],
         prepared.append({
             "id": item_id, "values": values, "created_at": created_at,
             "raw_json": json.dumps(payload, ensure_ascii=False),
-            "source_hash": hashes[item_id],
+            # detalhe falhou: grava o que temos, mas sem hash -> proxima
+            # execucao detecta como "mudado" e completa o registro
+            "source_hash": hashes[item_id] if detail_ok else None,
         })
         events.append((str(item_id), "I", None, None, None))
         stats.inserted += 1
+        if not detail_ok:
+            stats.detail_failures += 1
 
     for item in changed_items:
-        payload = resolve(item)
+        payload, detail_ok = resolve(item)
         item_id = _item_id(spec, item)
+        if not detail_ok:
+            # nao sobrescreve dados bons com uma listagem incompleta; o
+            # source_hash antigo fica, entao a proxima execucao tenta de novo
+            stats.detail_failures += 1
+            logger.warning("[%s] Detalhe de %s indisponivel; mantendo dados atuais.",
+                           spec.name, item_id)
+            continue
         values = spec.extract_row(payload)
         old = existing[item_id]
         changes = diff_row(spec, old, values)

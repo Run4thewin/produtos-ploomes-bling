@@ -83,3 +83,99 @@ def test_upsert_sql_all_core_specs():
 def test_entity_key_single_and_composite():
     spec = SPECS["orders"]
     assert engine.entity_key(spec, {"id": 5}) == "5"
+
+
+# ---------------------------------------------------------------------------
+# Resiliencia: detalhe indisponivel nao pode corromper dados nem "fixar" o hash
+# ---------------------------------------------------------------------------
+
+class _FakeBling:
+    """Simula o BlingClient: listagem ok, detalhe sempre falhando."""
+    def __init__(self):
+        self.detail_calls = 0
+
+
+class _FakeConn:
+    """Conexao minima: o engine faz commit() para soltar a transacao antes
+    das chamadas HTTP (ver _process_page)."""
+    def __init__(self):
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_detail_failure_leaves_hash_null_for_new_record(monkeypatch):
+    """Registro novo com detalhe falho e' gravado SEM source_hash, para que a
+    proxima execucao o detecte como 'mudado' e complete os dados."""
+    spec = SPECS["contacts"]
+    monkeypatch.setattr(engine, "fetch_detail", lambda *a, **k: None)
+
+    captured = {}
+    monkeypatch.setattr(engine, "upsert_rows",
+                        lambda conn, s, prepared: captured.setdefault("prep", prepared))
+    monkeypatch.setattr(engine, "record_history", lambda *a, **k: 0)
+    monkeypatch.setattr(engine, "select_existing", lambda *a, **k: {})
+
+    stats = engine.LoadStats(entity=spec.name)
+    conn = _FakeConn()
+    engine._process_page(_FakeBling(), conn, spec,
+                         [{"id": 1, "nome": "X"}], "run", "changed", stats)
+
+    assert conn.commits >= 1, "transacao deve ser solta antes das chamadas HTTP"
+    assert stats.detail_failures == 1
+    assert captured["prep"][0]["source_hash"] is None, (
+        "hash nao pode ser gravado quando o detalhe falhou — o registro ficaria "
+        "permanentemente incompleto")
+
+
+def test_detail_failure_does_not_overwrite_existing_good_data(monkeypatch):
+    """Registro existente com detalhe falho e' PULADO, preservando as colunas
+    que so vem do detalhe (senao viraria NULL)."""
+    spec = SPECS["contacts"]
+    monkeypatch.setattr(engine, "fetch_detail", lambda *a, **k: None)
+
+    captured = {}
+    monkeypatch.setattr(engine, "upsert_rows",
+                        lambda conn, s, prepared: captured.setdefault("prep", prepared))
+    monkeypatch.setattr(engine, "record_history", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        engine, "select_existing",
+        lambda *a, **k: {1: {"source_hash": "hash-antigo", "deleted_at": None,
+                             "name": "Nome Bom", "city": "Campinas"}})
+
+    stats = engine.LoadStats(entity=spec.name)
+    engine._process_page(_FakeBling(), _FakeConn(), spec,
+                         [{"id": 1, "nome": "X"}], "run", "changed", stats)
+
+    assert stats.detail_failures == 1
+    assert captured["prep"] == [], "nada deve ser gravado — dados bons seriam perdidos"
+
+
+# ---------------------------------------------------------------------------
+# Singleton (ex.: empresas/me/dados-basicos): 1 unico registro, nunca pagina.
+# Regressao: sem o corte explicito, o loop rebuscava o mesmo item ate
+# max_pages (999 em producao), desperdicando quota todo dia.
+# ---------------------------------------------------------------------------
+
+def test_singleton_entity_stops_after_first_page(monkeypatch):
+    spec = SPECS["empresas"]
+    assert spec.singleton, "precondicao: empresas deve ser singleton"
+
+    calls = {"fetch_page": 0}
+
+    def fake_fetch_page(bling, endpoint, page, page_size, extra_params):
+        calls["fetch_page"] += 1
+        return [{"id": "abc123", "nome": "Empresa X"}]
+
+    monkeypatch.setattr(engine, "fetch_page", fake_fetch_page)
+    monkeypatch.setattr(engine, "select_existing", lambda *a, **k: {})
+    monkeypatch.setattr(engine, "upsert_rows", lambda *a, **k: 1)
+    monkeypatch.setattr(engine, "record_history", lambda *a, **k: 0)
+
+    stats = engine.load_entity(_FakeBling(), _FakeConn(), spec,
+                               mode="full", max_pages=999, page_size=100)
+
+    assert calls["fetch_page"] == 1, (
+        f"singleton deve parar apos 1 pagina; chamou fetch_page {calls['fetch_page']}x")
+    assert stats.completed is True

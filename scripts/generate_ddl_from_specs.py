@@ -45,7 +45,8 @@ BEGIN;
 def render(spec) -> str:
     lines = [f"-- {spec.name} ({spec.endpoint})"]
     lines.append(f"CREATE TABLE IF NOT EXISTS {spec.table} (")
-    cols = ["    id                bigint PRIMARY KEY"]
+    id_type = SQL_TYPES[spec.id_sql_type]
+    cols = [f"    {'id':<17} {id_type} PRIMARY KEY"]
     for f in spec.fields:
         sql_type = SQL_TYPES[f.sql_type]
         cols.append(f"    {f.column:<26} {sql_type}")

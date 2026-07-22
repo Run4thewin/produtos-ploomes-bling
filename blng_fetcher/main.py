@@ -46,12 +46,22 @@ FULL_SWEEP_DAYS = int(os.environ.get("BLING_FULL_SWEEP_DAYS", "7"))
 
 
 def get_db_conn():
+    # keepalives: se o processo morrer/cair a rede, o servidor derruba a sessao
+    # em vez de deixar um "idle in transaction" segurando o advisory lock.
+    # idle_in_transaction_session_timeout: rede de seguranca (5 min) para o
+    # mesmo caso — sem isso, uma carga interrompida bloqueia as proximas.
     return psycopg2.connect(
         host=os.environ["DB_HOST"],
         port=int(os.environ.get("DB_PORT", 5432)),
         dbname=os.environ["DB_NAME"],
         user=os.environ["DB_USER"],
         password=os.environ["DB_PASSWORD"],
+        connect_timeout=15,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+        options="-c idle_in_transaction_session_timeout=300000",
     )
 
 
@@ -108,7 +118,7 @@ def check_entity_table(conn, spec: EntitySpec) -> bool:
 
 def run_entity(bling: BlingClient, conn, spec: EntitySpec, *,
                mode: str, max_pages: int, page_size: int, start_page: int,
-               explicit: bool) -> engine.LoadStats | None:
+               explicit: bool, detail: str = "auto") -> engine.LoadStats | None:
     """explicit=True quando o usuario pediu essa entidade pelo nome
     (ignora o cooldown de small_config)."""
     st = sync_state.get_state(conn, spec.name)
@@ -162,7 +172,9 @@ def run_entity(bling: BlingClient, conn, spec: EntitySpec, *,
         is_full_sweep = True  # mode=full explicito
 
     detail_override = None
-    if is_full_sweep and spec.detail_endpoint:
+    if detail != "auto":
+        detail_override = detail       # forcado pelo operador (--detail)
+    elif is_full_sweep and spec.detail_endpoint:
         detail_override = "always"  # corrige deriva de campos so-do-detalhe
 
     if spec.id_batch_source:
@@ -286,7 +298,7 @@ def resolve_targets(entity: str) -> list[EntitySpec]:
 
 
 def main(entity: str = "all", mode: str = "incremental", max_pages: int = 1,
-         page_size: int = 100, start_page: int = 1):
+         page_size: int = 100, start_page: int = 1, detail: str = "auto"):
     logger.info(
         "Iniciando carga — entity=%s mode=%s max_pages=%s page_size=%s start_page=%s",
         entity, mode, max_pages, page_size, start_page,
@@ -298,7 +310,10 @@ def main(entity: str = "all", mode: str = "incremental", max_pages: int = 1,
 
     try:
         if not sync_state.acquire_lock(conn):
-            logger.warning("Outra execucao do blng_fetcher em andamento; saindo.")
+            logger.warning(
+                "Outra execucao do blng_fetcher em andamento; saindo. Detentor: %s",
+                sync_state.describe_lock_holder(conn),
+            )
             return
         if not check_infra(conn):
             return
@@ -315,7 +330,7 @@ def main(entity: str = "all", mode: str = "incremental", max_pages: int = 1,
                 run_entity(
                     bling, conn, spec,
                     mode=mode, max_pages=max_pages, page_size=page_size,
-                    start_page=start_page, explicit=explicit,
+                    start_page=start_page, explicit=explicit, detail=detail,
                 )
             except DailyQuotaExceeded as exc:
                 logger.warning("Quota diaria atingida (%s); parando tudo.", exc)
@@ -350,6 +365,11 @@ if __name__ == "__main__":
         "--start-page", type=int, default=1,
         help="Pagina inicial (default: 1). Use para retomar uma carga interrompida.",
     )
+    parser.add_argument(
+        "--detail", default="auto", choices=["auto", "never", "changed", "always"],
+        help="Forca a estrategia de busca de detalhe. auto (default) segue a spec; "
+             "changed e' util p/ retomar carga sem rebuscar o que ja tem hash.",
+    )
     args = parser.parse_args()
     main(entity=args.entity, mode=args.mode, max_pages=args.pages,
-         page_size=args.page_size, start_page=args.start_page)
+         page_size=args.page_size, start_page=args.start_page, detail=args.detail)
