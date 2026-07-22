@@ -313,18 +313,21 @@ def map_ploomes_to_bling(ploomes_product: dict, settings: Settings) -> dict:
     fields = extract_ploomes_fields(ploomes_product, settings)
     validate_ploomes_required_fields(fields, ploomes_product)
 
+    nome = build_product_name(
+        fields["fabricante"],
+        fields["partnumber"],
+        fields["breve_descricao"],
+    )
     payload: dict[str, Any] = {
-        "nome": build_product_name(
-            fields["fabricante"],
-            fields["partnumber"],
-            fields["breve_descricao"],
-        ),
+        "nome": nome,
         "codigo": fields["partnumber"],
         "preco": fields["preco"],
         "tipo": "P",
         "formato": "S",
         "situacao": fields["situacao"],
-        "descricaoCurta": fields["breve_descricao"],
+        # descricaoCurta espelha o nome (mesmo texto) para nao divergir do que
+        # aparece no item do pedido/NF-e, que puxa a descricao do produto.
+        "descricaoCurta": nome,
         "marca": fields["fabricante"],
         "unidade": "UN",
     }
