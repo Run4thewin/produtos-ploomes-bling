@@ -47,6 +47,14 @@ steps:
       - --allow-unauthenticated
       - --memory=512Mi
       - --timeout=3600
+      # O rate limiter do Bling (app/clients/rate_limit.py) e' um singleton em
+      # memoria do processo -- nao coordena entre instancias. Com mais de 1
+      # instancia do servico rodando ao mesmo tempo, a soma das requisicoes
+      # ultrapassa o limite de 3 req/s do Bling e gera 429 mesmo sem ter
+      # atingido a cota diaria. O teto e' da conta Bling inteira, entao mais
+      # instancias nunca aumentam a vazao real -- so travar em 1 elimina o
+      # estouro sem perder throughput de verdade.
+      - --max-instances=1
       - --set-secrets=BLING_CLIENT_ID=bling-client-id:latest,BLING_CLIENT_SECRET=bling-client-secret:latest,PLOOMES_USER_KEY=ploomes-user-key:latest,INTERNAL_SECRET=internal-secret:latest,DB_PASSWORD=db-password:latest
       - --update-env-vars=^@^USE_CLOUD_TASKS=true@GCP_PROJECT=$PROJECT_ID@CLOUD_TASKS_LOCATION=${_REGION}@CLOUD_TASKS_QUEUE=${_QUEUE}@PLOOMES_GROUP_ID=${_PLOOMES_GROUP_ID}@GCS_BUCKET=${_GCS_BUCKET}@SERVICE_URL=${_SERVICE_URL}@CLOUD_TASKS_SERVICE_ACCOUNT=${_TASKS_SA}@PLOOMES_WEBHOOK_VALIDATION_KEY=${_PLOOMES_WEBHOOK_KEY}@PLOOMES_PRODUCT_ENTITY_ID=10@BLING_TOKENS_PATH=bling/tokens.json@DB_HOST=${_DB_HOST}@DB_PORT=${_DB_PORT}@DB_NAME=${_DB_NAME}@DB_USER=${_DB_USER}
 
