@@ -1,7 +1,7 @@
 .env
 tokens.json
 .bling_quota.json
-service_account.json
+service_account*
 client_secret*.json
 relatorios/
 __pycache__/

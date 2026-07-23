@@ -15,7 +15,17 @@ from __future__ import annotations
 
 import os
 
-from .base import EntitySpec, FieldSpec, _parse_date
+from .base import EntitySpec, FieldSpec, _parse_date, _parse_dt
+from .core import _nfe_total
+
+
+def _caixas_valor_assinado(c: dict) -> float:
+    # A listagem de /caixas ja devolve valor negativo p/ debito; o detalhe
+    # devolve sempre positivo e so' o campo debCred indica o sinal. Normaliza
+    # os dois para o mesmo formato (negativo = debito) usando debCred como
+    # fonte de verdade, nao o sinal bruto do campo.
+    valor = abs(float(c.get("valor", 0) or 0))
+    return -valor if c.get("debCred") == "D" else valor
 
 # ---------------------------------------------------------------------------
 # Transacionais
@@ -90,6 +100,32 @@ PROPOSTAS_COMERCIAIS = EntitySpec(
         FieldSpec("transporte_prazo_entrega", "transporte.prazoEntrega",
                   sql_type="bigint"),
         FieldSpec("transporte_peso_bruto", "transporte.pesoBruto", sql_type="numeric"),
+    ),
+)
+
+# Notas de entrada (compras): mesmo endpoint "nfe" da NF-e de saida, filtrado
+# por tipo=0 (tipo=1 = saida, ja coberto pela spec "nfe" em core.py). Confirmado
+# via probe direto em 2026-07-23: GET nfe?tipo=0 retorna 200 com registros
+# reais nesta conta (nao precisa de escopo adicional).
+NFE_ENTRADA = EntitySpec(
+    name="nfe_entrada",
+    endpoint="nfe",
+    table="bling_nfe_entrada",
+    list_params={"tipo": "0"},
+    window_param="dataEmissaoInicial",
+    window_days_back=45,
+    detail_endpoint="nfe/{id}",
+    detail_when="changed",
+    fields=(
+        FieldSpec("numero", compute=lambda n: str(n.get("numero", ""))),
+        FieldSpec("serie",
+                  compute=lambda n: str(n["serie"]) if n.get("serie") is not None else None),
+        FieldSpec("situation", compute=lambda n: str(n.get("situacao", ""))),
+        FieldSpec("contact_id", "contato.id", sql_type="bigint"),
+        FieldSpec("contact_name", "contato.nome"),
+        FieldSpec("total", sql_type="numeric", compute=_nfe_total),
+        FieldSpec("issue_date", "dataEmissao", sql_type="date", transform=_parse_date),
+        FieldSpec("chave_acesso", "chaveAcesso"),
     ),
 )
 
@@ -305,11 +341,46 @@ SITUACOES_MODULOS = EntitySpec(
     enabled=False, fields=(),
 )
 
+# Caixas e bancos (lancamentos financeiros): escopo liberado e resondado em
+# 2026-07-23. Filtro dataInicial/dataFinal honrado (par).
+#
+# Sem detail_endpoint DE PROPOSITO: o detalhe (GET caixas/{id}) tem um
+# formato de payload DIFERENTE da listagem -- perde "descricao" (nao existe
+# no detalhe) e o resolve() do engine substitui o item inteiro pelo detalhe,
+# entao usar detail_when apagaria "descricao" de quase todo registro. Listagem
+# sozinha ja cobre os campos essenciais e nao gasta quota extra por registro;
+# campos so-do-detalhe (categoria, competencia, saldo, tipoLancamento) ficam
+# de fora. Valor: listagem ja usa sinal (negativo=debito) -- normalizado via
+# _caixas_valor_assinado (fonte de verdade e' debCred, nao o sinal bruto, p/
+# ficar correto tambem se um dia o detalhe passar a ser usado).
+CAIXAS = EntitySpec(
+    name="caixas",
+    endpoint="caixas",
+    table="bling_caixas",
+    window_param="dataInicial",
+    window_param_final="dataFinal",
+    window_days_back=45,
+    fields=(
+        FieldSpec("deb_cred", "debCred"),
+        FieldSpec("situacao", "situacao"),
+        FieldSpec("valor", sql_type="numeric", compute=_caixas_valor_assinado),
+        FieldSpec("data", "data", sql_type="date", transform=_parse_dt),
+        FieldSpec("observacoes", "observacoes"),
+        FieldSpec("descricao", "descricao"),
+        FieldSpec("origem_id", "origem.id", sql_type="bigint"),
+        FieldSpec("contato_id", "contato.id", sql_type="bigint"),
+        FieldSpec("contato_nome", "contato.nome"),
+        FieldSpec("contato_documento", "contato.cnpj"),
+        FieldSpec("conta_financeira_id", "contaFinanceira.id", sql_type="bigint"),
+        FieldSpec("conta_financeira_descricao", "contaFinanceira.descricao"),
+    ),
+)
+
 
 EXPANSION_SPECS: tuple[EntitySpec, ...] = (
-    PEDIDOS_COMPRAS, PROPOSTAS_COMERCIAIS, NFCE, ESTOQUES_SALDOS,
+    PEDIDOS_COMPRAS, PROPOSTAS_COMERCIAIS, NFCE, NFE_ENTRADA, ESTOQUES_SALDOS,
     DEPOSITOS, VENDEDORES, CATEGORIAS_PRODUTOS, CATEGORIAS_RECEITAS_DESPESAS,
     GRUPOS_PRODUTOS, CONTATOS_TIPOS, FORMAS_PAGAMENTOS, CONTAS_CONTABEIS,
     CANAIS_VENDA, CAMPOS_CUSTOMIZADOS_MODULOS, EMPRESAS,
-    NFSE, CONTRATOS, LOGISTICAS, SITUACOES_MODULOS,
+    NFSE, CONTRATOS, LOGISTICAS, SITUACOES_MODULOS, CAIXAS,
 )

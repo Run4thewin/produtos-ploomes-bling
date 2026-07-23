@@ -28,7 +28,10 @@ def _parse_dt(value) -> datetime | None:
     s = str(value)
     if s.startswith("0000"):
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+                # DD/MM/YYYY: usado pelo detalhe de /caixas (a listagem do mesmo
+                # endpoint usa ISO — o Bling e' inconsistente entre os dois).
+                "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"):
         try:
             return datetime.strptime(s[:26], fmt)
         except ValueError:

@@ -627,7 +627,10 @@ def _sync_tab(ws, headers: list[str], rows: list[list]):
         },
         "horizontalAlignment": "CENTER",
     })
-    ws.freeze(rows=1)
+    if total > 1:
+        # Sheets rejeita congelar a unica linha existente ("You can't freeze
+        # all visible rows"); sem linhas de dados nao ha o que congelar mesmo.
+        ws.freeze(rows=1)
     logger.info("'%s' sincronizada — %s linhas.", ws.title, total - 1)
 
 

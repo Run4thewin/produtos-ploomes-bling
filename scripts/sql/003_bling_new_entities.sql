@@ -97,6 +97,25 @@ CREATE TABLE IF NOT EXISTS bling_nfce (
 );
 GRANT SELECT, INSERT, UPDATE ON bling_nfce TO api_user;
 
+-- nfe_entrada (nfe)
+CREATE TABLE IF NOT EXISTS bling_nfe_entrada (
+    id                bigint PRIMARY KEY,
+    numero                     text,
+    serie                      text,
+    situation                  text,
+    contact_id                 bigint,
+    contact_name               text,
+    total                      numeric,
+    issue_date                 date,
+    chave_acesso               text,
+    created_at        timestamp without time zone NOT NULL DEFAULT now(),
+    updated_at        timestamp without time zone NOT NULL DEFAULT now(),
+    raw_json          jsonb,
+    source_hash       text,
+    deleted_at        timestamptz
+);
+GRANT SELECT, INSERT, UPDATE ON bling_nfe_entrada TO api_user;
+
 -- estoques_saldos (estoques/saldos)
 CREATE TABLE IF NOT EXISTS bling_estoques_saldos (
     id                bigint PRIMARY KEY,
@@ -277,6 +296,29 @@ CREATE TABLE IF NOT EXISTS bling_empresas (
     deleted_at        timestamptz
 );
 GRANT SELECT, INSERT, UPDATE ON bling_empresas TO api_user;
+
+-- caixas (caixas)
+CREATE TABLE IF NOT EXISTS bling_caixas (
+    id                bigint PRIMARY KEY,
+    deb_cred                   text,
+    situacao                   text,
+    valor                      numeric,
+    data                       date,
+    observacoes                text,
+    descricao                  text,
+    origem_id                  bigint,
+    contato_id                 bigint,
+    contato_nome               text,
+    contato_documento          text,
+    conta_financeira_id        bigint,
+    conta_financeira_descricao text,
+    created_at        timestamp without time zone NOT NULL DEFAULT now(),
+    updated_at        timestamp without time zone NOT NULL DEFAULT now(),
+    raw_json          jsonb,
+    source_hash       text,
+    deleted_at        timestamptz
+);
+GRANT SELECT, INSERT, UPDATE ON bling_caixas TO api_user;
 
 -- Sem escopo OAuth nesta conta (tabela criada quando habilitar):
 --   nfse -> bling_nfse (nfse)
