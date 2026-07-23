@@ -473,6 +473,8 @@ CONFIG_TABS: dict[str, str] = {
     "campos_customizados_modulos": "Campos Customizados",
     "empresas": "Empresa",
     "nfce": "NFC-e",
+    "nfe_entrada": "Notas de Entrada",
+    "caixas": "Caixas e Bancos",
     # estoques_saldos fica de fora: carga pulada a pedido, tabela vazia.
 }
 
@@ -581,22 +583,19 @@ def _get_or_create_tab(spreadsheet, tab_name: str, n_rows: int, n_cols: int):
     import gspread
     try:
         ws = spreadsheet.worksheet(tab_name)
-        ws.resize(rows=n_rows, cols=n_cols)
+        _retry_on_429(ws.resize, rows=n_rows, cols=n_cols)
         return ws
     except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=n_rows, cols=n_cols)
+        ws = _retry_on_429(spreadsheet.add_worksheet, title=tab_name, rows=n_rows, cols=n_cols)
         logger.info("Aba '%s' criada.", tab_name)
         return ws
 
 
-def _write_batch(ws, data: list[list], start_row: int, last_col: str):
+def _retry_on_429(fn, *args, **kwargs):
     import gspread.exceptions
-    end_row = start_row + len(data) - 1
-    range_notation = f"A{start_row}:{last_col}{end_row}"
     for attempt in range(3):
         try:
-            ws.update(values=data, range_name=range_notation, value_input_option="RAW")
-            return
+            return fn(*args, **kwargs)
         except gspread.exceptions.APIError as exc:
             if "429" in str(exc) and attempt < 2:
                 logger.warning("Rate limit. Aguardando %ss...", RETRY_WAIT)
@@ -605,10 +604,16 @@ def _write_batch(ws, data: list[list], start_row: int, last_col: str):
                 raise
 
 
+def _write_batch(ws, data: list[list], start_row: int, last_col: str):
+    end_row = start_row + len(data) - 1
+    range_notation = f"A{start_row}:{last_col}{end_row}"
+    _retry_on_429(ws.update, values=data, range_name=range_notation, value_input_option="RAW")
+
+
 def _sync_tab(ws, headers: list[str], rows: list[list]):
     last_col = _col_letter(len(headers))
     logger.info("Limpando aba '%s'...", ws.title)
-    ws.clear()
+    _retry_on_429(ws.clear)
 
     all_data = [headers] + rows
     total = len(all_data)
@@ -618,7 +623,7 @@ def _sync_tab(ws, headers: list[str], rows: list[list]):
         _write_batch(ws, chunk, start_row=start + 1, last_col=last_col)
         logger.info("  %s / %s linhas", min(start + len(chunk), total), total)
 
-    ws.format(f"A1:{last_col}1", {
+    _retry_on_429(ws.format, f"A1:{last_col}1", {
         "backgroundColor": {"red": 0.122, "green": 0.306, "blue": 0.486},
         "textFormat": {
             "bold": True,
@@ -630,7 +635,7 @@ def _sync_tab(ws, headers: list[str], rows: list[list]):
     if total > 1:
         # Sheets rejeita congelar a unica linha existente ("You can't freeze
         # all visible rows"); sem linhas de dados nao ha o que congelar mesmo.
-        ws.freeze(rows=1)
+        _retry_on_429(ws.freeze, rows=1)
     logger.info("'%s' sincronizada — %s linhas.", ws.title, total - 1)
 
 
@@ -640,19 +645,21 @@ def _append_log(spreadsheet, entries: list[dict]):
     try:
         log_ws = spreadsheet.worksheet(log_name)
     except gspread.WorksheetNotFound:
-        log_ws = spreadsheet.add_worksheet(title=log_name, rows=500, cols=5)
-        log_ws.update(
+        log_ws = _retry_on_429(spreadsheet.add_worksheet, title=log_name, rows=500, cols=5)
+        _retry_on_429(
+            log_ws.update,
             values=[["Data/Hora", "Aba", "Linhas", "Tempo (s)", "Status"]],
             range_name="A1:E1",
         )
-        log_ws.format("A1:E1", {"textFormat": {"bold": True}})
+        _retry_on_429(log_ws.format, "A1:E1", {"textFormat": {"bold": True}})
 
-    for e in entries:
-        log_ws.append_row(
-            [datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             e["tab"], e["rows"], round(e["elapsed"], 1), e["status"]],
-            value_input_option="RAW",
-        )
+    rows = [
+        [datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+         e["tab"], e["rows"], round(e["elapsed"], 1), e["status"]]
+        for e in entries
+    ]
+    if rows:
+        _retry_on_429(log_ws.append_rows, rows, value_input_option="RAW")
 
 # ---------------------------------------------------------------------------
 # Main

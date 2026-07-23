@@ -243,3 +243,22 @@ def test_custom_range_warns_when_entity_has_no_date_filter(monkeypatch, caplog):
 
     assert captured["extra_params"] == {}
     assert any("nao suporta filtro de data" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _item_id: o Bling e' inconsistente entre listagem/detalhe do mesmo endpoint
+# (ex.: /caixas devolve id como string na listagem, numero no detalhe).
+# Regressao: sem normalizar, "WHERE id = ANY(%s)" quebra (bigint = text).
+# ---------------------------------------------------------------------------
+
+def test_item_id_normalizes_numeric_string_to_int():
+    spec = SPECS["caixas"]
+    assert engine._item_id(spec, {"id": "26410354010"}) == 26410354010
+    assert isinstance(engine._item_id(spec, {"id": "26410354010"}), int)
+    assert engine._item_id(spec, {"id": 26410354010}) == 26410354010
+
+
+def test_item_id_keeps_non_numeric_string_as_is():
+    spec = SPECS["empresas"]  # id e' um hash, nao numero
+    assert engine._item_id(spec, {"id": "0eb83224356c67486524da1f45246af0"}) \
+        == "0eb83224356c67486524da1f45246af0"

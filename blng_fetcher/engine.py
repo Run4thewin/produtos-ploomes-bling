@@ -171,8 +171,19 @@ def diff_row(spec: EntitySpec, old: dict, new: dict) -> list[tuple[str, str | No
 # ---------------------------------------------------------------------------
 
 def _item_id(spec: EntitySpec, item: dict):
-    """Id do item conforme a spec (ex.: estoques/saldos usa produto.id)."""
-    return _dig(item, spec.id_path)
+    """Id do item conforme a spec (ex.: estoques/saldos usa produto.id).
+
+    Normaliza string puramente numerica para int: o Bling e' inconsistente
+    entre listagem e detalhe do mesmo endpoint (ex.: /caixas devolve id como
+    string na listagem e como numero no detalhe) -- sem isso, o mesmo
+    registro gera dois tipos diferentes conforme a origem, e a comparacao
+    "WHERE id = ANY(%s)" quebra contra uma coluna bigint (bigint = text).
+    Ids nao-numericos (ex.: hash de /empresas) ficam como string, intactos.
+    """
+    value = _dig(item, spec.id_path)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return value
 
 
 def entity_key(spec: EntitySpec, row: dict) -> str:
