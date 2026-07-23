@@ -4,7 +4,11 @@
 substitutions:
   _REGION: us-central1
   _REPOSITORY: ploomes-bling
-  _SERVICE: ploomes-bling-sync
+  # Nome real do servico ja deployado (confirmado via `gcloud run services
+  # list`) -- nao "ploomes-bling-sync". Um _SERVICE errado aqui faria o
+  # proximo deploy CRIAR um servico novo em vez de atualizar o existente,
+  # perdendo config como --max-instances=1 (ver step de deploy abaixo).
+  _SERVICE: produtos-ploomes-bling
   _QUEUE: ploomes-bling-products
   _PLOOMES_GROUP_ID: "1100000674"
   _GCS_BUCKET: ""
