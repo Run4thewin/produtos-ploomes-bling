@@ -179,3 +179,67 @@ def test_singleton_entity_stops_after_first_page(monkeypatch):
     assert calls["fetch_page"] == 1, (
         f"singleton deve parar apos 1 pagina; chamou fetch_page {calls['fetch_page']}x")
     assert stats.completed is True
+
+
+# ---------------------------------------------------------------------------
+# Carga avulsa por --since/--until (blng_fetcher/main.py): deve montar o
+# filtro nativo do Bling corretamente e jamais tocar bling_sync_state.
+# ---------------------------------------------------------------------------
+
+def test_custom_range_builds_incremental_filter_and_skips_sync_state(monkeypatch):
+    from blng_fetcher import main as fetcher_main
+
+    spec = SPECS["orders"]  # tem incremental_param = dataAlteracaoInicial
+    captured = {}
+
+    def fake_load_entity(bling, conn, spec_, *, mode, max_pages, page_size,
+                         run_id, extra_params, detail_when_override, **_):
+        captured["extra_params"] = extra_params
+        captured["mode"] = mode
+        return engine.LoadStats(entity=spec_.name, status="ok", completed=True)
+
+    monkeypatch.setattr(engine, "load_entity", fake_load_entity)
+    # se o codigo tentar ler/gravar sync_state aqui, o teste quebra (funcoes
+    # nao mockadas explodiriam ao tentar usar _FakeConn como conexao real)
+    import blng_fetcher.state as sync_state_mod
+    monkeypatch.setattr(sync_state_mod, "get_state",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("nao deveria ler sync_state")))
+    monkeypatch.setattr(sync_state_mod, "save_state",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("nao deveria gravar sync_state")))
+
+    fetcher_main.run_entity_custom_range(
+        _FakeBling(), _FakeConn(), spec,
+        since="2026-07-20", until="2026-07-21",
+        max_pages=999, page_size=100, detail="auto",
+    )
+
+    assert captured["extra_params"] == {
+        "dataAlteracaoInicial": "2026-07-20",
+        "dataAlteracaoFinal": "2026-07-21",
+    }
+    assert captured["mode"] == "full"
+
+
+def test_custom_range_warns_when_entity_has_no_date_filter(monkeypatch, caplog):
+    from blng_fetcher import main as fetcher_main
+
+    spec = SPECS["receber"]  # confirmado na sondagem: ignora todos os filtros
+    assert not spec.incremental_param and not spec.window_param
+
+    captured = {}
+    monkeypatch.setattr(
+        engine, "load_entity",
+        lambda bling, conn, spec_, **k: captured.setdefault("extra_params", k["extra_params"])
+        or engine.LoadStats(entity=spec_.name))
+
+    with caplog.at_level("WARNING"):
+        fetcher_main.run_entity_custom_range(
+            _FakeBling(), _FakeConn(), spec,
+            since="2026-07-20", until="2026-07-21",
+            max_pages=1, page_size=100, detail="auto",
+        )
+
+    assert captured["extra_params"] == {}
+    assert any("nao suporta filtro de data" in r.message for r in caplog.records)

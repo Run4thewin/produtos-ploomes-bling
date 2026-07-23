@@ -7,6 +7,8 @@ Uso:
     python -m blng_fetcher.main --entity all --mode incremental --pages 999  # producao
     python -m blng_fetcher.main --entity contacts --mode full --pages 5      # backfill
     python -m blng_fetcher.main --entity nfe-detail                          # backfill NF-e
+    python -m blng_fetcher.main --entity all --since 2026-07-20 --until 2026-07-21
+        # carga avulsa de um intervalo de datas (nao mexe no watermark incremental)
 
 Entidades: all | config | transacional | <nome da spec> | nfe-detail
 (specs em blng_fetcher/specs; requer scripts/sql/001 e 002 aplicados)
@@ -227,6 +229,52 @@ def run_entity(bling: BlingClient, conn, spec: EntitySpec, *,
     return stats
 
 
+def run_entity_custom_range(bling: BlingClient, conn, spec: EntitySpec, *,
+                            since: str, until: str, max_pages: int, page_size: int,
+                            detail: str) -> engine.LoadStats:
+    """Carga avulsa filtrada por um intervalo de datas explicito (--since/--until).
+
+    Deliberadamente NAO le nem grava bling_sync_state: e' uma carga fora do
+    ciclo automatico (ex.: preencher "so ontem" antes do backfill completo),
+    entao nao pode avancar o watermark nem interferir numa retomada por quota
+    do modo incremental/full normal.
+    """
+    extra_params: dict = {}
+    param = spec.incremental_param or spec.window_param
+    if param:
+        final = (spec.incremental_param_final or spec.window_param_final
+                 or param.replace("Inicial", "Final"))
+        extra_params[param] = since
+        extra_params[final] = until
+    else:
+        logger.warning(
+            "[%s] API do Bling nao suporta filtro de data para esta entidade; "
+            "carga completa (--since/--until ignorados no request, sera filtrado "
+            "apenas por estar sempre atualizada via source_hash).",
+            spec.name,
+        )
+
+    run_id = str(uuid.uuid4())
+    if spec.id_batch_source:
+        logger.warning("[%s] entidade por lote de ids nao suporta --since/--until; pulando.",
+                       spec.name)
+        return engine.LoadStats(entity=spec.name, status="skipped")
+
+    stats = engine.load_entity(
+        bling, conn, spec,
+        mode="full", max_pages=max_pages, page_size=page_size,
+        run_id=run_id, extra_params=extra_params,
+        detail_when_override=(None if detail == "auto" else detail),
+    )
+    logger.info(
+        "[%s] Carga %s..%s concluida: status=%s novos=%s alterados=%s inalterados=%s "
+        "historico=%s detalhes=%s",
+        spec.name, since, until, stats.status, stats.inserted, stats.updated,
+        stats.unchanged, stats.history_rows, stats.detail_requests,
+    )
+    return stats
+
+
 # ---------------------------------------------------------------------------
 # Backfill: busca detalhe /nfe/{id} para cada registro ja no banco (legado)
 # ---------------------------------------------------------------------------
@@ -298,10 +346,13 @@ def resolve_targets(entity: str) -> list[EntitySpec]:
 
 
 def main(entity: str = "all", mode: str = "incremental", max_pages: int = 1,
-         page_size: int = 100, start_page: int = 1, detail: str = "auto"):
+         page_size: int = 100, start_page: int = 1, detail: str = "auto",
+         since: str | None = None, until: str | None = None):
     logger.info(
-        "Iniciando carga — entity=%s mode=%s max_pages=%s page_size=%s start_page=%s",
+        "Iniciando carga — entity=%s mode=%s max_pages=%s page_size=%s start_page=%s"
+        "%s",
         entity, mode, max_pages, page_size, start_page,
+        f" since={since} until={until}" if since else "",
     )
 
     bling = BlingClient()
@@ -327,11 +378,17 @@ def main(entity: str = "all", mode: str = "incremental", max_pages: int = 1,
             if not check_entity_table(conn, spec):
                 continue
             try:
-                run_entity(
-                    bling, conn, spec,
-                    mode=mode, max_pages=max_pages, page_size=page_size,
-                    start_page=start_page, explicit=explicit, detail=detail,
-                )
+                if since and until:
+                    run_entity_custom_range(
+                        bling, conn, spec, since=since, until=until,
+                        max_pages=max_pages, page_size=page_size, detail=detail,
+                    )
+                else:
+                    run_entity(
+                        bling, conn, spec,
+                        mode=mode, max_pages=max_pages, page_size=page_size,
+                        start_page=start_page, explicit=explicit, detail=detail,
+                    )
             except DailyQuotaExceeded as exc:
                 logger.warning("Quota diaria atingida (%s); parando tudo.", exc)
                 break
@@ -370,6 +427,20 @@ if __name__ == "__main__":
         help="Forca a estrategia de busca de detalhe. auto (default) segue a spec; "
              "changed e' util p/ retomar carga sem rebuscar o que ja tem hash.",
     )
+    parser.add_argument(
+        "--since", default=None, metavar="YYYY-MM-DD",
+        help="Carga avulsa filtrada por data (usa o filtro nativo do Bling: "
+             "dataAlteracaoInicial ou a janela de emissao/vencimento, conforme "
+             "a entidade). Requer --until junto. NAO mexe no watermark do modo "
+             "incremental -- e' uma carga fora do ciclo automatico.",
+    )
+    parser.add_argument(
+        "--until", default=None, metavar="YYYY-MM-DD",
+        help="Fim do intervalo para --since.",
+    )
     args = parser.parse_args()
+    if bool(args.since) != bool(args.until):
+        parser.error("--since e --until devem ser usados juntos")
     main(entity=args.entity, mode=args.mode, max_pages=args.pages,
-         page_size=args.page_size, start_page=args.start_page, detail=args.detail)
+         page_size=args.page_size, start_page=args.start_page, detail=args.detail,
+         since=args.since, until=args.until)
