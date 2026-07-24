@@ -1,31 +1,35 @@
 """
-pipeline.py — entry point do Cloud Run Job (bling-pipeline, roda de hora em
-hora via Cloud Scheduler). Executa em sequência, cada passo so' comeca se o
-anterior terminou com sucesso:
-  1. blng_fetcher/main.py       (Bling -> PostgreSQL)
-  2. scripts/sync_to_sheets.py  (PostgreSQL -> Google Sheets)
-  3. scripts/sync_to_drive_excel.py (PostgreSQL -> .xlsx/.xml no Drive)
-     -- SO as 4h (horario de Sao Paulo), nao a cada hora.
+pipeline.py — entry point do Cloud Run Job (bling-pipeline, roda 1x/dia via
+Cloud Scheduler). Executa em sequência, cada passo so' comeca se o anterior
+terminou com sucesso:
+  1. blng_fetcher/main.py (--since/--until = dia anterior)  (Bling -> PostgreSQL)
+  2. blng_fetcher/main.py --entity estoques_saldos           (saldo atual, sem data)
+  3. scripts/sync_to_sheets.py                                (PostgreSQL -> Sheets)
+  4. scripts/sync_to_drive_excel.py                           (PostgreSQL -> .xlsx/.xml no Drive)
 
-O passo 3 e' encadeado aqui (nao tem Cloud Scheduler proprio) de proposito:
-scripts/sync_to_drive_excel.py so' LE o banco, entao precisa que o passo 1
-(que ESCREVE) ja tenha terminado -- dois Jobs/Schedulers independentes na
-mesma hora corririam o risco do export ler o banco no meio de uma
-atualizacao (dado "rasgado", parte nova/parte velha). Rodando em sequencia
-dentro do MESMO processo, o export so' inicia depois que o fetcher (e o
-sheets) realmente concluirem -- se o passo 1 falhar, run() encerra o
-processo e o passo 3 nem executa naquela hora.
+Por que --since/--until em vez de --mode incremental: a carga foi limitada de
+propósito a "somente o dia anterior" (ao invés de watermark contínuo ou janela
+de 45-90 dias a cada execução) para conter o consumo da cota diária da API do
+Bling. --since/--until não mexe no watermark (bling_sync_state) -- e' uma
+janela fixa, então não faz sentido rodar de hora em hora (a mesma consulta se
+repetiria o dia inteiro); por isso o Cloud Scheduler passou a disparar 1x/dia.
+
+estoques_saldos fica de fora do --since/--until (o fetcher ignora essa
+entidade nesse modo -- ela não busca por data, busca por lote de ids de
+produto) e' carregada à parte, no seu próprio modo incremental normal.
+
+Os 3 passos seguintes ficam encadeados aqui (não têm Cloud Scheduler próprio)
+de propósito: cada um só lê o que o anterior escreveu -- rodando em sequência
+dentro do MESMO processo, nunca leem o banco no meio de uma atualização.
 """
 import logging
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("pipeline")
-
-DAILY_EXPORT_HOUR = 4  # horario de America/Sao_Paulo
 
 
 def run(cmd: list[str]) -> None:
@@ -37,16 +41,12 @@ def run(cmd: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    # incremental: usa watermark/janela por entidade (bling_sync_state);
-    # --pages 999 nao e' custo fixo — o filtro incremental reduz as paginas
-    run([sys.executable, "blng_fetcher/main.py",
-         "--entity", "all", "--mode", "incremental", "--pages", "999"])
-    run([sys.executable, "scripts/sync_to_sheets.py"])
+    ontem = (datetime.now(ZoneInfo("America/Sao_Paulo")) - timedelta(days=1)).date().isoformat()
+    log.info("Carregando o dia anterior: %s", ontem)
 
-    hora_sp = datetime.now(ZoneInfo("America/Sao_Paulo")).hour
-    if hora_sp == DAILY_EXPORT_HOUR:
-        log.info("Execucao das %sh (Sao Paulo): rodando export diario Excel/XML.", hora_sp)
-        run([sys.executable, "scripts/sync_to_drive_excel.py"])
-    else:
-        log.info("Execucao das %sh (Sao Paulo): fora da janela do export diario (%sh); pulando.",
-                 hora_sp, DAILY_EXPORT_HOUR)
+    run([sys.executable, "blng_fetcher/main.py",
+         "--entity", "all", "--since", ontem, "--until", ontem, "--pages", "999"])
+    run([sys.executable, "blng_fetcher/main.py",
+         "--entity", "estoques_saldos", "--mode", "incremental", "--pages", "999"])
+    run([sys.executable, "scripts/sync_to_sheets.py"])
+    run([sys.executable, "scripts/sync_to_drive_excel.py"])
