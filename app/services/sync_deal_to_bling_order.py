@@ -300,6 +300,8 @@ class DealToBlingOrderSyncService:
     ) -> None:
         order_id = sales_order.get("id")
         order_number = sales_order.get("numero") or order_id
+        title = deal.get("Title") or ""
+        new_title = title if str(title).startswith(str(order_number)) else f"{order_number} - {title}"
         order_reference = (
             f"Pedido Bling {order_number}: "
             f"https://www.bling.com.br/vendas.php#edit/{order_id}"
@@ -324,6 +326,7 @@ class DealToBlingOrderSyncService:
         self.ploomes.update_deal(
             deal["Id"],
             {
+                "Title": new_title,
                 "StageId": rule.target_stage_id,
                 "OtherProperties": other_properties,
             },
@@ -478,6 +481,8 @@ class DealToBlingOrderSyncService:
             )
 
         order_number = sales_order.get("numero") or sales_order_id
+        title = deal.get("Title") or ""
+        new_title = title if str(title).startswith(str(order_number)) else f"{order_number} - {title}"
         order_reference = (
             f"Pedido Bling {order_number}: "
             f"https://www.bling.com.br/vendas.php#edit/{sales_order_id}"
@@ -495,7 +500,7 @@ class DealToBlingOrderSyncService:
                     "StringValue": str(sales_order_id),
                 }
             )
-        self.ploomes.update_deal(deal["Id"], {"OtherProperties": other_properties})
+        self.ploomes.update_deal(deal["Id"], {"Title": new_title, "OtherProperties": other_properties})
 
         logger.info(
             "[LOGISTICS_DIRECT] Pedido de venda %s criado direto para Logistica a partir do Deal %s",
