@@ -704,6 +704,11 @@ class DealToBlingOrderSyncService:
             deal,
             self.settings.ploomes_deal_purchase_order_field,
         )
+        if not purchase_order:
+            raise DealOrderValidationError(
+                "Deal sem numero do pedido de compra do cliente "
+                "(campo obrigatorio para gerar pedido no Bling)"
+            )
         payment_method_name = self._get_property_value(
             deal,
             self.settings.ploomes_deal_payment_method_field,
