@@ -432,3 +432,22 @@ def reconcile_job(
     _check_internal_secret(x_internal_secret)
     report = ProductSyncService().reconcile(apply_fixes=True)
     return {"status": "completed", "report": report}
+
+
+@app.post("/jobs/refresh-bling-token")
+def refresh_bling_token_job(
+    x_internal_secret: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _check_internal_secret(x_internal_secret)
+    try:
+        bling = BlingClient(get_settings())
+        token = bling.force_refresh_access_token()
+        logger.info("Access token Bling renovado via job schedule")
+        return {
+            "status": "completed",
+            "message": "Access token renovado com sucesso",
+            "token_renewed": True,
+        }
+    except RuntimeError as exc:
+        logger.exception("Erro ao renovar token Bling via job schedule")
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
