@@ -23,6 +23,8 @@ ORDERS = EntitySpec(
     endpoint="pedidos/vendas",
     table="bling_orders",
     incremental_param="dataAlteracaoInicial",
+    detail_endpoint="pedidos/vendas/{id}",
+    detail_when="changed",                # itens so no detalhe
     created_at_field=FieldSpec("created_at", "data", sql_type="timestamp", transform=_parse_dt),
     fields=(
         FieldSpec("order_number", compute=lambda o: str(o.get("numero", ""))),

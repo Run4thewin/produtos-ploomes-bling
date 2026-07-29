@@ -83,6 +83,9 @@ ENTITIES: list[Entity] = [
             "End. Entrega", "End. Cobrança",
             "Contact ID", "Nome Contato", "Documento", "Tipo Pessoa",
             "Fornecedor", "Cliente", "E-mail", "Telefone", "Cidade", "UF", "IE",
+            "Item Nº", "Item Descrição", "Item Produto ID", "Item Código",
+            "Item Qtd", "Item Unidade", "Item Valor Unit (R$)", "Item Desconto",
+            "Item Total (R$)", "Item Comissão (R$)",
         ],
         sql="""
             SELECT
@@ -113,11 +116,27 @@ ENTITIES: list[Entity] = [
                 c.phone,
                 c.city,
                 c.state,
-                o.client_ie
+                o.client_ie,
+                item.ord,
+                NULLIF(item.data ->> 'descricao', ''),
+                NULLIF((item.data -> 'produto' ->> 'id')::text, '0'),
+                NULLIF(item.data ->> 'codigo', ''),
+                (item.data ->> 'quantidade')::numeric,
+                NULLIF(item.data ->> 'unidade', ''),
+                (item.data ->> 'valor')::numeric,
+                (item.data ->> 'desconto')::numeric,
+                (item.data ->> 'quantidade')::numeric * (item.data ->> 'valor')::numeric,
+                (item.data -> 'comissao' ->> 'valor')::numeric
             FROM bling_orders o
             LEFT JOIN bling_contacts c ON c.id = o.client_id::bigint
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_array_length(COALESCE(o.raw_json::jsonb -> 'itens', '[]'::jsonb)) > 0
+                     THEN o.raw_json::jsonb -> 'itens'
+                     ELSE '[{}]'::jsonb
+                END
+            ) WITH ORDINALITY AS item(data, ord)
             WHERE o.client_id ~ '^[0-9]+$'
-            ORDER BY o.created_at DESC
+            ORDER BY o.created_at DESC, o.id, item.ord
         """,
     ),
 
@@ -129,6 +148,9 @@ ENTITIES: list[Entity] = [
             "Valor (R$)", "Data Emissão", "Criado em", "Atualizado em",
             "Contact ID", "Nome Contato", "Documento", "Tipo Pessoa",
             "Fornecedor", "Cliente", "E-mail", "Telefone", "Cidade", "UF",
+            "Item Nº", "Item Descrição", "Item Código", "Item Qtd", "Item Unidade",
+            "Item Valor Unit (R$)", "Item Valor Total (R$)", "Item CFOP", "Item NCM",
+            "Item Nº Pedido Compra", "Item ICMS (R$)",
         ],
         sql="""
             SELECT
@@ -155,10 +177,27 @@ ENTITIES: list[Entity] = [
                 c.email,
                 c.phone,
                 c.city,
-                c.state
+                c.state,
+                item.ord,
+                NULLIF(item.data ->> 'descricao', ''),
+                NULLIF(item.data ->> 'codigo', ''),
+                (item.data ->> 'quantidade')::numeric,
+                NULLIF(item.data ->> 'unidade', ''),
+                (item.data ->> 'valor')::numeric,
+                (item.data ->> 'valorTotal')::numeric,
+                NULLIF(item.data ->> 'cfop', ''),
+                NULLIF(item.data ->> 'classificacaoFiscal', ''),
+                NULLIF(item.data ->> 'numeroPedidoCompra', ''),
+                (item.data -> 'impostos' -> 'icms' ->> 'valor')::numeric
             FROM bling_nfe n
             LEFT JOIN bling_contacts c ON c.id = n.contact_id
-            ORDER BY n.issue_date DESC NULLS LAST
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_array_length(COALESCE(n.raw_json::jsonb -> 'itens', '[]'::jsonb)) > 0
+                     THEN n.raw_json::jsonb -> 'itens'
+                     ELSE '[{}]'::jsonb
+                END
+            ) WITH ORDINALITY AS item(data, ord)
+            ORDER BY n.issue_date DESC NULLS LAST, n.id, item.ord
         """,
     ),
 
@@ -336,6 +375,9 @@ ENTITIES: list[Entity] = [
             "Fornecedor ID", "Nome Fornecedor", "Documento",
             "E-mail", "Telefone", "Cidade", "UF",
             "Criado em", "Atualizado em",
+            "Item Nº", "Item Descrição", "Item Produto ID", "Item Código Produto",
+            "Item Qtd", "Item Unidade", "Item Valor Unit (R$)", "Item Total (R$)",
+            "Item Código Fornecedor",
         ],
         sql="""
             SELECT
@@ -368,11 +410,26 @@ ENTITIES: list[Entity] = [
                 c.city,
                 c.state,
                 pc.created_at,
-                pc.updated_at
+                pc.updated_at,
+                item.ord,
+                NULLIF(item.data ->> 'descricao', ''),
+                NULLIF((item.data -> 'produto' ->> 'id')::text, '0'),
+                NULLIF(item.data -> 'produto' ->> 'codigo', ''),
+                (item.data ->> 'quantidade')::numeric,
+                NULLIF(item.data ->> 'unidade', ''),
+                (item.data ->> 'valor')::numeric,
+                (item.data ->> 'quantidade')::numeric * (item.data ->> 'valor')::numeric,
+                NULLIF(item.data ->> 'codigoFornecedor', '')
             FROM bling_pedidos_compras pc
             LEFT JOIN bling_contacts c ON c.id = pc.fornecedor_id
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_array_length(COALESCE(pc.raw_json::jsonb -> 'itens', '[]'::jsonb)) > 0
+                     THEN pc.raw_json::jsonb -> 'itens'
+                     ELSE '[{}]'::jsonb
+                END
+            ) WITH ORDINALITY AS item(data, ord)
             WHERE pc.deleted_at IS NULL
-            ORDER BY pc.data DESC NULLS LAST
+            ORDER BY pc.data DESC NULLS LAST, pc.id, item.ord
         """,
     ),
 
@@ -387,6 +444,9 @@ ENTITIES: list[Entity] = [
             "E-mail", "Telefone", "Cidade", "UF",
             "Vendedor", "Observações",
             "Criado em", "Atualizado em",
+            "Item Nº", "Item Descrição", "Item Produto ID", "Item Código",
+            "Item Qtd", "Item Unidade", "Item Valor Unit (R$)", "Item Desconto",
+            "Item Total (R$)",
         ],
         sql="""
             SELECT
@@ -411,12 +471,89 @@ ENTITIES: list[Entity] = [
                 v.contato_nome,
                 NULLIF(p.observacoes, ''),
                 p.created_at,
-                p.updated_at
+                p.updated_at,
+                item.ord,
+                NULLIF(item.data ->> 'descricao', ''),
+                NULLIF((item.data -> 'produto' ->> 'id')::text, '0'),
+                NULLIF(item.data ->> 'codigo', ''),
+                (item.data ->> 'quantidade')::numeric,
+                NULLIF(item.data ->> 'unidade', ''),
+                (item.data ->> 'valor')::numeric,
+                (item.data ->> 'desconto')::numeric,
+                (item.data ->> 'quantidade')::numeric * (item.data ->> 'valor')::numeric
             FROM bling_propostas_comerciais p
             LEFT JOIN bling_contacts   c ON c.id = p.contato_id
             LEFT JOIN bling_vendedores v ON v.id = p.vendedor_id
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_array_length(COALESCE(p.raw_json::jsonb -> 'itens', '[]'::jsonb)) > 0
+                     THEN p.raw_json::jsonb -> 'itens'
+                     ELSE '[{}]'::jsonb
+                END
+            ) WITH ORDINALITY AS item(data, ord)
             WHERE p.deleted_at IS NULL
-            ORDER BY p.data DESC NULLS LAST
+            ORDER BY p.data DESC NULLS LAST, p.id, item.ord
+        """,
+    ),
+
+    Entity(
+        key="nfe_entrada",
+        tab="Notas de Entrada",
+        headers=[
+            "ID Bling", "NF Número", "NF Série", "Status", "Status Raw",
+            "Valor (R$)", "Data Emissão", "Chave de Acesso", "Criado em", "Atualizado em",
+            "Contact ID", "Nome Contato", "Documento", "Tipo Pessoa",
+            "Fornecedor", "Cliente", "E-mail", "Telefone", "Cidade", "UF",
+            "Item Nº", "Item Descrição", "Item Código", "Item Qtd", "Item Unidade",
+            "Item Valor Unit (R$)", "Item Valor Total (R$)", "Item CFOP", "Item NCM",
+            "Item Nº Pedido Compra", "Item ICMS (R$)",
+        ],
+        sql="""
+            SELECT
+                n.id::text,
+                n.numero,
+                n.serie,
+                CASE n.situation
+                    WHEN '1' THEN 'Pendente'
+                    WHEN '6' THEN 'Autorizada'
+                    WHEN '9' THEN 'Inutilizada'
+                    ELSE n.situation
+                END,
+                n.situation,
+                n.total,
+                n.issue_date,
+                NULLIF(n.chave_acesso, ''),
+                n.created_at,
+                n.updated_at,
+                n.contact_id::text,
+                COALESCE(c.name, n.contact_name),
+                c.document,
+                c.person_type,
+                c.is_supplier,
+                c.is_client,
+                c.email,
+                c.phone,
+                c.city,
+                c.state,
+                item.ord,
+                NULLIF(item.data ->> 'descricao', ''),
+                NULLIF(item.data ->> 'codigo', ''),
+                (item.data ->> 'quantidade')::numeric,
+                NULLIF(item.data ->> 'unidade', ''),
+                (item.data ->> 'valor')::numeric,
+                (item.data ->> 'valorTotal')::numeric,
+                NULLIF(item.data ->> 'cfop', ''),
+                NULLIF(item.data ->> 'classificacaoFiscal', ''),
+                NULLIF(item.data ->> 'numeroPedidoCompra', ''),
+                (item.data -> 'impostos' -> 'icms' ->> 'valor')::numeric
+            FROM bling_nfe_entrada n
+            LEFT JOIN bling_contacts c ON c.id = n.contact_id
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_array_length(COALESCE(n.raw_json::jsonb -> 'itens', '[]'::jsonb)) > 0
+                     THEN n.raw_json::jsonb -> 'itens'
+                     ELSE '[{}]'::jsonb
+                END
+            ) WITH ORDINALITY AS item(data, ord)
+            ORDER BY n.issue_date DESC NULLS LAST, n.id, item.ord
         """,
     ),
 
@@ -473,7 +610,6 @@ CONFIG_TABS: dict[str, str] = {
     "campos_customizados_modulos": "Campos Customizados",
     "empresas": "Empresa",
     "nfce": "NFC-e",
-    "nfe_entrada": "Notas de Entrada",
     "caixas": "Caixas e Bancos",
     # estoques_saldos fica de fora: carga pulada a pedido, tabela vazia.
 }
