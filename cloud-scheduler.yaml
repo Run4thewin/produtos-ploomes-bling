@@ -1,0 +1,20 @@
+# Cloud Scheduler job para renovar token Bling automaticamente
+# Deploy: gcloud scheduler jobs create app-engine <nome> --config cloud-scheduler.yaml
+#
+# ANTES DE USAR:
+# 1. Substitua ${PROJECT_ID} pelo seu GCP project ID
+# 2. Substitua ${SERVICE_URL} pela URL do serviço Cloud Run (ex: https://produtos-ploomes-bling-xyz.run.app)
+# 3. Substitua ${INTERNAL_SECRET} pelo valor de INTERNAL_SECRET da app (no Secret Manager)
+
+name: bling-token-refresh
+description: "Renova token OAuth do Bling proativamente a cada 24 horas"
+schedule: "0 3 * * *"  # 3 AM todos os dias UTC
+timezone: "America/Sao_Paulo"  # Ajustar se necessário
+httpTarget:
+  uri: "${SERVICE_URL}/jobs/refresh-bling-token"
+  httpMethod: POST
+  oidcToken:
+    serviceAccountEmail: "cloud-scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
+  headers:
+    Content-Type: "application/json"
+    x-internal-secret: "${INTERNAL_SECRET}"
