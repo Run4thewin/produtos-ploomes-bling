@@ -943,21 +943,24 @@ class DealToBlingOrderSyncService:
         payment_method_id: str,
     ) -> list[dict[str, Any]]:
         days = str(payment_days or 0)
-        parts = [part.strip() for part in days.split("/") if part.strip()]
-        if not parts:
-            parts = ["0"]
+        raw_parts = [part.strip() for part in days.split("/") if part.strip()]
+        if not raw_parts:
+            raw_parts = ["0"]
+        # Bling nao aceita parcela com vencimento no mesmo dia da emissao;
+        # prazo 0 sempre vira 1 dia, para qualquer forma de pagamento.
+        parts = [int(float(part)) or 1 for part in raw_parts]
 
         installment_value = total / len(parts)
         return [
             {
                 "dataVencimento": (
-                    datetime.today() + timedelta(days=int(float(part)))
+                    datetime.today() + timedelta(days=days_offset)
                 ).strftime("%Y-%m-%d"),
                 "valor": installment_value,
                 "observacoes": "",
                 "formaPagamento": {"id": int(payment_method_id)},
             }
-            for part in parts
+            for days_offset in parts
         ]
 
     def _payment_days(self, deal: dict[str, Any]) -> Any:
