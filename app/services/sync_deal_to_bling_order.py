@@ -412,22 +412,176 @@ class DealToBlingOrderSyncService:
             }
 
         sales_order_id = link["bling_pedido_venda_id"]
+
         try:
-            self.bling.update_sales_order_situacao(sales_order_id, situacao_id)
+            # 1. Carrega o pedido original
+            original_order = self.bling.get_sales_order(sales_order_id)
+            
+            # 2. Carrega a quote do deal duplicado (itens que vao ficar de saldo)
+            quote = self.ploomes.get_latest_quote_by_deal(deal["Id"])
+            if not quote:
+                raise DealOrderValidationError("Deal duplicado sem quote para calcular o faturamento parcial")
+
+            # 3. Compara os itens e descobre se houve reducao
+            original_items = original_order.get("itens") or []
+            deal_payload = self._build_sales_order_payload(deal, quote)
+            deal_items = deal_payload.get("itens") or []
+            
+            items_to_invoice, items_to_keep = self._calculate_partial_billing_split(original_items, deal_items)
+            
+            if items_to_invoice:
+                logger.info(
+                    "[LOGISTICS_PARTIAL] Diferenca de itens detectada para Deal %s. Faturando %s itens e mantendo %s itens no saldo.",
+                    deal.get("Id"), len(items_to_invoice), len(items_to_keep)
+                )
+                
+                # Passo A e B: Cria novo pedido com itens a faturar e avanca situacao
+                new_payload = deal_payload.copy()
+                new_payload["itens"] = items_to_invoice
+                
+                # Recalcula parcelas baseadas no novo total a faturar
+                total_to_invoice = sum(float(item.get("quantidade") or 0) * float(item.get("valor") or 0) for item in items_to_invoice)
+                payment_method_name = self._get_property_value(deal, self.settings.ploomes_deal_payment_method_field, value_keys=("ObjectValueName", "StringValue", "IntegerValue"))
+                payment_method_id = self._lookup_config_map(self.settings.bling_payment_methods, payment_method_name)
+                payment_days = self._payment_days(deal)
+                freight_value = self._get_property_value(deal, self.settings.ploomes_deal_freight_value_field)
+                if freight_value is not None:
+                     total_to_invoice += float(freight_value)
+                if payment_method_id:
+                     new_payload["parcelas"] = self._build_installments(total_to_invoice, payment_days, payment_method_id)
+
+                created_new = self.bling.create_sales_order(new_payload)
+                new_order_id = created_new.get("id")
+                
+                if new_order_id:
+                     if self.settings.bling_situacao_em_processo_compra:
+                          self._advance_sales_order_situacao(new_order_id, self.settings.bling_situacao_em_processo_compra)
+                     if situacao_id:
+                          self.bling.update_sales_order_situacao(new_order_id, situacao_id)
+                     
+                     # Atualiza o titulo do deal duplicado (que agora representa o faturamento parcial/novo pedido)
+                     # Para faturamento parcial manual o titulo/referencia do novo pedido
+                     new_order = self.bling.get_sales_order(new_order_id)
+                     # Passamos uma StageRule mock para forçar o sucesso e vinculação.
+                     # Vamos apenas invocar _mark_deal_success que já trata tudo.
+                     rule_mock = StageRule(
+                          pipeline_id=deal.get("PipelineId") or 0,
+                          source_stage_id=deal.get("StageId") or 0,
+                          target_stage_id=deal.get("StageId") or 0
+                     )
+                     self._mark_deal_success(deal, new_order, rule_mock)
+                     # Atualizamos no banco legacy caso precise
+                     self._save_order_link(deal["Id"], new_order_id, None)
+
+                     logger.info("[LOGISTICS_PARTIAL] Novo pedido criado para faturamento parcial: %s", new_order_id)
+                
+                # Passo C: Atualiza o pedido original para manter apenas o saldo
+                if items_to_keep:
+                    update_payload = {"itens": items_to_keep}
+                    # Opcionalmente recalcular parcelas do pedido original aqui se a API do Bling exigir para PUT.
+                    self.bling.update_sales_order(sales_order_id, update_payload)
+                    logger.info("[LOGISTICS_PARTIAL] Pedido original %s atualizado com o saldo de %s itens.", sales_order_id, len(items_to_keep))
+                
+                # Para fins de rastreio, consideramos o deal processado com base no original
+                # Note: Precisamos definir onde o link do *novo* pedido de venda deve ficar salvo.
+                # Como o Deal que disparou a acao foi o duplicado, atualizamos a situacao do pedido original (que agora eh o saldo)
+                # se necessario.
+
+            else:
+                # Fluxo normal, sem faturamento parcial
+                if situacao_id:
+                    self.bling.update_sales_order_situacao(sales_order_id, situacao_id)
+
+        except DealOrderValidationError as exc:
+             logger.warning("[LOGISTICS] Erro de validacao Deal %s: %s", deal.get("Id"), exc)
+             return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": str(exc)}
         except httpx.HTTPStatusError as exc:
             reason = self._describe_bling_http_error(exc)
             logger.warning(
-                "[LOGISTICS] Falha ao mudar situacao do pedido %s: %s", sales_order_id, reason
+                "[LOGISTICS] Falha ao interagir com Bling para pedido %s: %s", sales_order_id, reason
             )
             return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": reason}
 
-        self._update_order_link_situacao(deal["Id"], situacao_id)
+        if situacao_id:
+             self._update_order_link_situacao(deal["Id"], situacao_id)
+             
         return {
             "action": "situacao_atualizada",
             "deal_id": deal.get("Id"),
             "bling_order_id": sales_order_id,
             "situacao_id": situacao_id,
         }
+
+    def _calculate_partial_billing_split(self, original_items: list[dict[str, Any]], deal_items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        # Helper method to calculate the difference between the original bling order and the new deal (saldo)
+        
+        # Build maps for easy lookup by product ID
+        orig_map = {}
+        for item in original_items:
+            # Bling returns item as {"item": {"codigo": ..., "quantidade": ..., "produto": {"id": ...}}}
+            # depending on the endpoint GET vs POST payload. Normalize to just extracting product id and quantity.
+            
+            # GET /pedidos/vendas returns:
+            # "itens": [ {"item": {"descricao": ..., "quantidade": ..., "codigo": ...}} ] 
+            # Or similar structure. We need to be careful with the exact Bling GET format.
+            # Assuming standard V3 format:
+            prod_id = item.get("produto", {}).get("id") or item.get("item", {}).get("produto", {}).get("id")
+            if prod_id:
+                orig_map[str(prod_id)] = float(item.get("quantidade") or item.get("item", {}).get("quantidade") or 0)
+                
+        deal_map = {}
+        for item in deal_items:
+            prod_id = item.get("produto", {}).get("id")
+            if prod_id:
+                deal_map[str(prod_id)] = {
+                    "item": item,
+                    "qty": float(item.get("quantidade") or 0)
+                }
+                
+        items_to_invoice = []
+        items_to_keep = deal_items # As per logic, the deal has the items to keep (saldo)
+        
+        has_difference = False
+        
+        for orig_prod_id, orig_qty in orig_map.items():
+            if orig_prod_id in deal_map:
+                deal_qty = deal_map[orig_prod_id]["qty"]
+                if deal_qty < orig_qty:
+                    has_difference = True
+                    invoice_qty = orig_qty - deal_qty
+                    invoice_item = deal_map[orig_prod_id]["item"].copy()
+                    invoice_item["quantidade"] = invoice_qty
+                    
+                    # Fix comission base based on new qty
+                    unit_price = float(invoice_item.get("valor") or 0)
+                    if "comissao" in invoice_item:
+                         invoice_item["comissao"]["base"] = invoice_qty * unit_price
+                         
+                    items_to_invoice.append(invoice_item)
+            else:
+                 # Original item is completely missing from the deal -> invoice it completely
+                 has_difference = True
+                 # We need to recreate the item payload from the original order to invoice it.
+                 # For simplicity, since the deal_items doesn't have it, we'd need to fetch the product details
+                 # or use the original item structure. 
+                 # To be safe, we should ideally find it in the original_items list and format it.
+                 # Let's find the original item and format it for POST
+                 for o_item in original_items:
+                      o_prod_id = str(o_item.get("produto", {}).get("id") or o_item.get("item", {}).get("produto", {}).get("id"))
+                      if o_prod_id == orig_prod_id:
+                           raw_item = o_item.get("item") or o_item
+                           items_to_invoice.append({
+                               "produto": {"id": int(orig_prod_id)},
+                               "quantidade": orig_qty,
+                               "valor": float(raw_item.get("valor") or raw_item.get("valorunidade") or 0),
+                               "descricao": raw_item.get("descricao", ""),
+                               # Other fields like discount might be needed, but this handles the core
+                           })
+                           break
+                           
+        if has_difference:
+             return items_to_invoice, items_to_keep
+        return [], []
 
     def _create_sales_order_direct_to_logistics(self, deal: dict[str, Any]) -> dict[str, Any]:
         # Deal pulou direto de um estagio anterior (Orcamento/Analise de Credito/
