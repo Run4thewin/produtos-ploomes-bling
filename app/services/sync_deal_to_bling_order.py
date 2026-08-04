@@ -439,6 +439,12 @@ class DealToBlingOrderSyncService:
                 new_payload = deal_payload.copy()
                 new_payload["itens"] = items_to_invoice
                 
+                # Injeta timestamp nas observacoes internas para evitar que o Bling 
+                # bloqueie a venda como "idêntica à última" no caso de retentativas
+                import time
+                base_obs = new_payload.get("observacoesInternas") or ""
+                new_payload["observacoesInternas"] = f"{base_obs}\nFaturamento Parcial: {int(time.time())}".strip()
+                
                 # Recalcula parcelas baseadas no novo total a faturar
                 total_to_invoice = sum(float(item.get("quantidade") or 0) * float(item.get("valor") or 0) for item in items_to_invoice)
                 payment_method_name = self._get_property_value(deal, self.settings.ploomes_deal_payment_method_field, value_keys=("ObjectValueName", "StringValue", "IntegerValue"))

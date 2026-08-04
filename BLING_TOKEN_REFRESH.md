@@ -27,14 +27,31 @@ Isso gera novo `tokens.json` com access_token + refresh_token válidos.
 
 Para **nunca** expirar novamente, configure um scheduler que chama `/jobs/refresh-bling-token` a cada 24 horas.
 
-#### Opção A: Cloud Scheduler (Produção)
+#### Opção A: Cloud Scheduler (Produção) - Recomendado
 
-1. No Console GCP, vá para **Cloud Scheduler**
-2. Crie novo job "bling-token-refresh"
-3. Configure:
+**Método 1: Via CLI (rápido)**
+
+```bash
+# Substitua os valores antes de executar
+PROJECT_ID="seu-gcp-project"
+SERVICE_URL="https://produtos-ploomes-bling-xyz.run.app"
+INTERNAL_SECRET="seu-internal-secret"
+
+bash setup-cloud-scheduler.sh $PROJECT_ID $SERVICE_URL $INTERNAL_SECRET
+```
+
+**Método 2: Via Console GCP (manual)**
+
+1. Console GCP → **Cloud Scheduler** → **Create Job**
+2. Configure:
+   - **Name**: `bling-token-refresh`
    - **Frequency**: `0 3 * * *` (3 AM diariamente)
-   - **HTTP Target**: POST `https://seu-service.run.app/jobs/refresh-bling-token`
-   - **Auth Header**: `x-internal-secret: ${INTERNAL_SECRET}`
+   - **Timezone**: `America/Sao_Paulo`
+   - **HTTP Target**: POST
+   - **URL**: `https://seu-service.run.app/jobs/refresh-bling-token`
+   - **Authentication**: OIDC Token
+   - **Service Account**: `cloud-scheduler@seu-project.iam.gserviceaccount.com`
+   - **Header - x-internal-secret**: (seu INTERNAL_SECRET do Secret Manager)
 
 #### Opção B: APScheduler (Desenvolvimento Local)
 

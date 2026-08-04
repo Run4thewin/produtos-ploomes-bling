@@ -145,12 +145,27 @@ ENTITIES: list[Entity] = [
         tab="NF-e",
         headers=[
             "ID Bling", "NF Número", "NF Série", "Status", "Status Raw",
-            "Valor (R$)", "Data Emissão", "Criado em", "Atualizado em",
+            "Valor (R$)", "Valor Frete (R$)", "Data Emissão", "Data Operação",
+            "Criado em", "Atualizado em",
+            "Chave de Acesso", "Tipo", "Tipo Nota", "Nº Pedido Loja",
+            "Optante Simples Nacional", "Vendedor ID", "Natureza Operação ID",
+            "Link PDF", "Link DANFE",
+            "Frete Por Conta", "Transportadora", "CNPJ Transportadora",
+            "Parcelas (Pagamento)",
             "Contact ID", "Nome Contato", "Documento", "Tipo Pessoa",
             "Fornecedor", "Cliente", "E-mail", "Telefone", "Cidade", "UF",
-            "Item Nº", "Item Descrição", "Item Código", "Item Qtd", "Item Unidade",
+            "IE (na Nota)", "RG (na Nota)", "Endereço (na Nota)",
+            "Item Nº", "Item Descrição", "Item Código", "Item GTIN", "Item CEST",
+            "Item Qtd", "Item Unidade",
             "Item Valor Unit (R$)", "Item Valor Total (R$)", "Item CFOP", "Item NCM",
-            "Item Nº Pedido Compra", "Item ICMS (R$)",
+            "Item Origem", "Item Peso Bruto (kg)", "Item Peso Líquido (kg)",
+            "Item Código Serviço", "Item Nº Pedido Compra",
+            "Item ICMS (R$)", "Item ICMS ST (R$)", "Item ICMS Origem",
+            "Item ICMS Alíquota (%)", "Item ICMS Modalidade",
+            "Item Valor Aprox. Tributos (R$)",
+            "Item Unid. Tributável", "Item Qtd Tributável",
+            "Item Exportação Drawback", "Item Exportação Chave NFe",
+            "Item Exportação Registro", "Item Informações Adicionais",
         ],
         sql="""
             SELECT
@@ -165,9 +180,24 @@ ENTITIES: list[Entity] = [
                 END,
                 n.situation,
                 n.total,
+                (n.raw_json::jsonb ->> 'valorFrete')::numeric,
                 n.issue_date,
+                NULLIF(n.raw_json::jsonb ->> 'dataOperacao', '0000-00-00 00:00:00'),
                 n.created_at,
                 n.updated_at,
+                NULLIF(n.raw_json::jsonb ->> 'chaveAcesso', ''),
+                (n.raw_json::jsonb ->> 'tipo')::int,
+                NULLIF(n.raw_json::jsonb ->> 'tipoNota', ''),
+                NULLIF(n.raw_json::jsonb ->> 'numeroPedidoLoja', ''),
+                (n.raw_json::jsonb ->> 'optanteSimplesNacional')::boolean,
+                NULLIF((n.raw_json::jsonb -> 'vendedor' ->> 'id'), '0'),
+                NULLIF((n.raw_json::jsonb -> 'naturezaOperacao' ->> 'id'), '0'),
+                NULLIF(n.raw_json::jsonb ->> 'linkPDF', ''),
+                NULLIF(n.raw_json::jsonb ->> 'linkDanfe', ''),
+                NULLIF(n.raw_json::jsonb -> 'transporte' ->> 'fretePorConta', ''),
+                NULLIF(n.raw_json::jsonb -> 'transporte' -> 'transportador' ->> 'nome', ''),
+                NULLIF(n.raw_json::jsonb -> 'transporte' -> 'transportador' ->> 'numeroDocumento', ''),
+                parcelas.resumo,
                 n.contact_id::text,
                 COALESCE(c.name, n.contact_name),
                 c.document,
@@ -178,19 +208,59 @@ ENTITIES: list[Entity] = [
                 c.phone,
                 c.city,
                 c.state,
+                NULLIF(n.raw_json::jsonb -> 'contato' ->> 'ie', ''),
+                NULLIF(n.raw_json::jsonb -> 'contato' ->> 'rg', ''),
+                NULLIF(TRIM(BOTH ', ' FROM
+                    COALESCE(n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'endereco', '') ||
+                    CASE WHEN COALESCE(n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'numero', '') <> ''
+                         THEN ', ' || (n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'numero') ELSE '' END ||
+                    CASE WHEN COALESCE(n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'complemento', '') <> ''
+                         THEN ' - ' || (n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'complemento') ELSE '' END ||
+                    CASE WHEN COALESCE(n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'bairro', '') <> ''
+                         THEN ', ' || (n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'bairro') ELSE '' END ||
+                    CASE WHEN COALESCE(n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'municipio', '') <> ''
+                         THEN ', ' || (n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'municipio')
+                              || '/' || COALESCE(n.raw_json::jsonb -> 'contato' -> 'endereco' ->> 'uf', '')
+                         ELSE '' END
+                ), ''),
                 item.ord,
                 NULLIF(item.data ->> 'descricao', ''),
                 NULLIF(item.data ->> 'codigo', ''),
+                NULLIF(item.data ->> 'gtin', ''),
+                NULLIF(item.data ->> 'cest', ''),
                 (item.data ->> 'quantidade')::numeric,
                 NULLIF(item.data ->> 'unidade', ''),
                 (item.data ->> 'valor')::numeric,
                 (item.data ->> 'valorTotal')::numeric,
                 NULLIF(item.data ->> 'cfop', ''),
                 NULLIF(item.data ->> 'classificacaoFiscal', ''),
+                NULLIF(item.data ->> 'origem', ''),
+                (item.data ->> 'pesoBruto')::numeric,
+                (item.data ->> 'pesoLiquido')::numeric,
+                NULLIF(item.data ->> 'codigoServico', ''),
                 NULLIF(item.data ->> 'numeroPedidoCompra', ''),
-                (item.data -> 'impostos' -> 'icms' ->> 'valor')::numeric
+                (item.data -> 'impostos' -> 'icms' ->> 'valor')::numeric,
+                (item.data -> 'impostos' -> 'icms' ->> 'st')::numeric,
+                NULLIF(item.data -> 'impostos' -> 'icms' ->> 'origem', ''),
+                (item.data -> 'impostos' -> 'icms' ->> 'aliquota')::numeric,
+                NULLIF(item.data -> 'impostos' -> 'icms' ->> 'modalidade', ''),
+                (item.data -> 'impostos' ->> 'valorAproximadoTotalTributos')::numeric,
+                NULLIF(item.data -> 'unidadeTributavel' ->> 'unidade', ''),
+                (item.data -> 'unidadeTributavel' ->> 'quantidade')::numeric,
+                NULLIF(item.data -> 'exportacao' ->> 'drawback', ''),
+                NULLIF(item.data -> 'exportacao' ->> 'chaveAcessoNFe', ''),
+                NULLIF(item.data -> 'exportacao' ->> 'registroExportacao', ''),
+                NULLIF(item.data ->> 'informacoesAdicionais', '')
             FROM bling_nfe n
             LEFT JOIN bling_contacts c ON c.id = n.contact_id
+            LEFT JOIN LATERAL (
+                SELECT string_agg(
+                    COALESCE(to_char(NULLIF(p ->> 'data', '0000-00-00')::date, 'DD/MM/YYYY'), p ->> 'data')
+                        || ': R$ ' || to_char((p ->> 'valor')::numeric, 'FM999G999G990D00'),
+                    ' | ' ORDER BY p ->> 'data'
+                ) AS resumo
+                FROM jsonb_array_elements(COALESCE(n.raw_json::jsonb -> 'parcelas', '[]'::jsonb)) AS p
+            ) parcelas ON true
             CROSS JOIN LATERAL jsonb_array_elements(
                 CASE WHEN jsonb_array_length(COALESCE(n.raw_json::jsonb -> 'itens', '[]'::jsonb)) > 0
                      THEN n.raw_json::jsonb -> 'itens'
