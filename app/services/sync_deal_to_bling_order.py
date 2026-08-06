@@ -742,10 +742,15 @@ class DealToBlingOrderSyncService:
             finally:
                 conn.close()
         except Exception as exc:
-            logger.warning(
-                "[LOGISTICS] Falha ao ler bling_order_links | deal_id=%s | %s", deal_id, exc
-            )
-            return None
+            # Nao pode tratar falha de leitura como "sem pedido vinculado": os
+            # chamadores usam esse resultado pra decidir se criam um pedido novo
+            # no Bling. Se o vinculo existe mas nao conseguimos confirmar por
+            # falha (ex: Postgres fora do ar), retornar None aqui cria duplicata
+            # a cada retry do webhook -- por isso propaga o erro em vez de
+            # assumir silenciosamente que nao ha pedido.
+            raise RuntimeError(
+                f"Falha ao consultar vinculo de pedido do Deal {deal_id}: {exc}"
+            ) from exc
 
         if not row:
             return None
