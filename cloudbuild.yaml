@@ -60,7 +60,14 @@ steps:
       # estouro sem perder throughput de verdade.
       - --max-instances=1
       - --set-secrets=BLING_CLIENT_ID=bling-client-id:latest,BLING_CLIENT_SECRET=bling-client-secret:latest,PLOOMES_USER_KEY=ploomes-user-key:latest,INTERNAL_SECRET=internal-secret:latest,DB_PASSWORD=db-password:latest
-      - --update-env-vars=^@^USE_CLOUD_TASKS=true@GCP_PROJECT=$PROJECT_ID@CLOUD_TASKS_LOCATION=${_REGION}@CLOUD_TASKS_QUEUE=${_QUEUE}@PLOOMES_GROUP_ID=${_PLOOMES_GROUP_ID}@GCS_BUCKET=${_GCS_BUCKET}@SERVICE_URL=${_SERVICE_URL}@CLOUD_TASKS_SERVICE_ACCOUNT=${_TASKS_SA}@PLOOMES_WEBHOOK_VALIDATION_KEY=${_PLOOMES_WEBHOOK_KEY}@PLOOMES_PRODUCT_ENTITY_ID=10@BLING_TOKENS_PATH=bling/tokens.json@DB_HOST=${_DB_HOST}@DB_PORT=${_DB_PORT}@DB_NAME=${_DB_NAME}@DB_USER=${_DB_USER}
+      # PLOOMES_DEAL_SALES_ORDER_ID_FIELD aponta pro campo "N. Pedido Bling"
+      # (deal_6454B19E-...), ja existente no Ploomes e sem uso anterior. Vira a
+      # fonte de verdade do vinculo Deal->pedido de venda (dispensa o fallback
+      # Postgres em DB_HOST/DB_NAME acima, que nunca teve conectividade real
+      # com o Cloud Run). Sem essa env var, o Deal fica sem forma confiavel de
+      # saber que ja tem pedido criado e recria pedido a cada webhook repetido
+      # do Ploomes enquanto o Deal permanecer no estagio-gatilho.
+      - --update-env-vars=^@^USE_CLOUD_TASKS=true@GCP_PROJECT=$PROJECT_ID@CLOUD_TASKS_LOCATION=${_REGION}@CLOUD_TASKS_QUEUE=${_QUEUE}@PLOOMES_GROUP_ID=${_PLOOMES_GROUP_ID}@GCS_BUCKET=${_GCS_BUCKET}@SERVICE_URL=${_SERVICE_URL}@CLOUD_TASKS_SERVICE_ACCOUNT=${_TASKS_SA}@PLOOMES_WEBHOOK_VALIDATION_KEY=${_PLOOMES_WEBHOOK_KEY}@PLOOMES_PRODUCT_ENTITY_ID=10@BLING_TOKENS_PATH=bling/tokens.json@DB_HOST=${_DB_HOST}@DB_PORT=${_DB_PORT}@DB_NAME=${_DB_NAME}@DB_USER=${_DB_USER}@PLOOMES_DEAL_SALES_ORDER_ID_FIELD=deal_6454B19E-E39A-4909-BFD0-3CADB493D4D3
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA
