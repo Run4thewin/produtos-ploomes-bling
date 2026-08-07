@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -21,6 +23,17 @@ logger = logging.getLogger(__name__)
 
 # O campo descricao do item de pedido no Bling rejeita (HTTP 400) acima de 50 chars.
 ITEM_DESCRICAO_MAX_LENGTH = 50
+
+# Circuit breaker contra loop de auto-disparo: o proprio update_deal() que os
+# fluxos usam pra marcar sucesso (Title/StageId/OtherProperties) dispara um novo
+# webhook de "update" do Ploomes para o mesmo Deal. Se o vinculo Deal->pedido nao
+# ficar consistente apos a criacao (ver incidente Deal 1107321216, 2026-08-07:
+# 39 pedidos duplicados em ~5min no fluxo de faturamento parcial, porque o pedido
+# novo nunca era gravado no campo fonte-de-verdade), cada webhook auto-disparado
+# recria outro pedido no Bling indefinidamente. Este limite bloqueia qualquer
+# segunda criacao de pedido para o mesmo Deal dentro da janela, independente de
+# qual fluxo/bug especifico a esta causando.
+ORDER_CREATION_COOLDOWN_SECONDS = 120
 
 
 class DealOrderValidationError(Exception):
@@ -55,6 +68,12 @@ class DirectToLogisticsRule:
 
 
 class DealToBlingOrderSyncService:
+    # Estado do circuit breaker fica na classe (nao na instancia): main.py cria um
+    # DealToBlingOrderSyncService novo a cada webhook, entao um lock de instancia
+    # nao pegaria chamadas repetidas para o mesmo Deal em requisicoes diferentes.
+    _last_order_created_at: dict[str, float] = {}
+    _order_creation_lock = threading.Lock()
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -64,6 +83,22 @@ class DealToBlingOrderSyncService:
         self.settings = settings or get_settings()
         self.bling = bling or BlingClient(self.settings)
         self.ploomes = ploomes or PloomesClient(self.settings)
+
+    def _check_duplicate_creation_guard(self, deal_id: Any) -> None:
+        key = str(deal_id)
+        now = time.monotonic()
+        with self._order_creation_lock:
+            last = self._last_order_created_at.get(key)
+        if last is not None and (now - last) < ORDER_CREATION_COOLDOWN_SECONDS:
+            raise DealOrderValidationError(
+                "Pedido Bling ja criado para este Deal ha menos de "
+                f"{ORDER_CREATION_COOLDOWN_SECONDS}s -- bloqueado para evitar "
+                "duplicidade (circuit breaker contra loop de webhook)"
+            )
+
+    def _record_order_creation(self, deal_id: Any) -> None:
+        with self._order_creation_lock:
+            self._last_order_created_at[str(deal_id)] = time.monotonic()
 
     def create_bling_order_from_deal(self, deal_id: int | str) -> dict[str, Any]:
         logger.info("[DEAL_ORDER] INICIO deal_id=%s | buscando Deal no Ploomes", deal_id)
@@ -134,6 +169,25 @@ class DealToBlingOrderSyncService:
             rule.source_stage_id,
             rule.target_stage_id,
         )
+
+        # Ploomes dispara o webhook varias vezes para a mesma mudanca (e o proprio
+        # update_deal que marca sucesso reaciona um novo webhook); sem esta checagem
+        # cada repeticao recria outro pedido -- mesma protecao ja existente no fluxo
+        # de compra (_create_purchase_flow_from_deal).
+        existing = self._get_order_link(deal)
+        if existing and existing.get("bling_pedido_venda_id"):
+            logger.info(
+                "[DEAL_ORDER] SKIP deal_id=%s | pedido %s ja vinculado",
+                deal.get("Id"),
+                existing["bling_pedido_venda_id"],
+            )
+            return {
+                "action": "skipped",
+                "reason": "pedido_ja_vinculado",
+                "deal_id": deal.get("Id"),
+                "bling_order_id": existing["bling_pedido_venda_id"],
+            }
+
         logger.info("[DEAL_ORDER] Buscando ultima quote | deal_id=%s", deal.get("Id"))
         quote = self.ploomes.get_latest_quote_by_deal(deal["Id"])
         if not quote:
@@ -159,10 +213,12 @@ class DealToBlingOrderSyncService:
             ),
         )
         logger.info("[DEAL_ORDER] Criando pedido no Bling | deal_id=%s", deal.get("Id"))
+        self._check_duplicate_creation_guard(deal["Id"])
         created = self.bling.create_sales_order(payload)
         order_id = created.get("id")
         if not order_id:
             raise RuntimeError(f"Bling criou pedido sem retornar id: {created}")
+        self._record_order_creation(deal["Id"])
 
         logger.info(
             "[DEAL_ORDER] Pedido criado no Bling | deal_id=%s bling_order_id=%s",
@@ -248,10 +304,12 @@ class DealToBlingOrderSyncService:
             raise DealOrderValidationError("Deal sem quote/orcamento para gerar pedido")
 
         payload = self._build_sales_order_payload(deal, quote)
+        self._check_duplicate_creation_guard(deal["Id"])
         created = self.bling.create_sales_order(payload)
         sales_order_id = created.get("id")
         if not sales_order_id:
             raise RuntimeError(f"Bling criou pedido de venda sem retornar id: {created}")
+        self._record_order_creation(deal["Id"])
         sales_order = self.bling.get_sales_order(sales_order_id)
 
         # Nao cria mais pedido de compra vinculado nesta etapa -- so o pedido de venda.
@@ -439,9 +497,8 @@ class DealToBlingOrderSyncService:
                 new_payload = deal_payload.copy()
                 new_payload["itens"] = items_to_invoice
                 
-                # Injeta timestamp nas observacoes internas para evitar que o Bling 
+                # Injeta timestamp nas observacoes internas para evitar que o Bling
                 # bloqueie a venda como "idêntica à última" no caso de retentativas
-                import time
                 base_obs = new_payload.get("observacoesInternas") or ""
                 new_payload["observacoesInternas"] = f"{base_obs}\nFaturamento Parcial: {int(time.time())}".strip()
                 
@@ -456,10 +513,11 @@ class DealToBlingOrderSyncService:
                 if payment_method_id:
                      new_payload["parcelas"] = self._build_installments(total_to_invoice, payment_days, payment_method_id)
 
+                self._check_duplicate_creation_guard(deal["Id"])
                 created_new = self.bling.create_sales_order(new_payload)
                 new_order_id = created_new.get("id")
-                
                 if new_order_id:
+                     self._record_order_creation(deal["Id"])
                      if self.settings.bling_situacao_em_processo_compra:
                           self._advance_sales_order_situacao(new_order_id, self.settings.bling_situacao_em_processo_compra)
                      if situacao_id:
@@ -600,10 +658,12 @@ class DealToBlingOrderSyncService:
                 raise DealOrderValidationError("Deal sem quote/orcamento para gerar pedido")
 
             payload = self._build_sales_order_payload(deal, quote)
+            self._check_duplicate_creation_guard(deal["Id"])
             created = self.bling.create_sales_order(payload)
             sales_order_id = created.get("id")
             if not sales_order_id:
                 raise RuntimeError(f"Bling criou pedido de venda sem retornar id: {created}")
+            self._record_order_creation(deal["Id"])
             sales_order = self.bling.get_sales_order(sales_order_id)
         except DealOrderValidationError as exc:
             logger.warning("[LOGISTICS_DIRECT] Deal %s nao processado: %s", deal.get("Id"), exc)
@@ -1201,17 +1261,29 @@ class DealToBlingOrderSyncService:
             order_id,
             order_number,
         )
+        other_properties = [
+            {
+                "FieldKey": self.settings.ploomes_deal_order_field,
+                "StringValue": order_reference,
+            }
+        ]
+        # Sem isto, _get_order_link nunca enxerga o pedido criado por este metodo
+        # (usado pelo fluxo legado e pelo faturamento parcial) e cada webhook
+        # seguinte -- inclusive o que o proprio update_deal abaixo dispara --
+        # recria outro pedido (ver ORDER_CREATION_COOLDOWN_SECONDS).
+        if self.settings.ploomes_deal_sales_order_id_field and order_id:
+            other_properties.append(
+                {
+                    "FieldKey": self.settings.ploomes_deal_sales_order_id_field,
+                    "StringValue": str(order_id),
+                }
+            )
         self.ploomes.update_deal(
             deal["Id"],
             {
                 "Title": new_title,
                 "StageId": rule.target_stage_id,
-                "OtherProperties": [
-                    {
-                        "FieldKey": self.settings.ploomes_deal_order_field,
-                        "StringValue": order_reference,
-                    }
-                ],
+                "OtherProperties": other_properties,
             },
         )
 

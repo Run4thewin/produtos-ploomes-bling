@@ -149,6 +149,9 @@ def make_ploomes_product(settings: Settings, partnumber: str = "SKU-123") -> dic
 
 
 class PloomesDealWebhookTest(unittest.TestCase):
+    def setUp(self):
+        DealToBlingOrderSyncService._last_order_created_at.clear()
+
     def test_parse_deal_webhook_extracts_deal_id(self):
         parsed = parse_ploomes_deal_webhook(
             {"EntityId": 2, "ActionId": 2, "New": {"Id": 123}},
@@ -431,6 +434,9 @@ class PurchaseFlowTest(unittest.TestCase):
         ploomes_deal_purchase_trigger_stage_rules="110001615:110006382:110006382",
     )
 
+    def setUp(self):
+        DealToBlingOrderSyncService._last_order_created_at.clear()
+
     def test_creates_sales_order_only_and_leaves_deal_in_place(self):
         settings = make_settings(**self.TRIGGER_SETTINGS)
         bling = FakeBlingClient(bling_products_by_code={"SKU-123": {"id": 700}})
@@ -533,6 +539,9 @@ class LogisticsStageTest(unittest.TestCase):
         ploomes_deal_logistics_stage_rules="110001615:110008939",
     )
 
+    def setUp(self):
+        DealToBlingOrderSyncService._last_order_created_at.clear()
+
     def test_updates_situacao_when_link_found(self):
         settings = make_settings(
             **self.LOGISTICS_SETTINGS, bling_situacao_pronto_faturar=42
@@ -627,6 +636,9 @@ class DirectToLogisticsTest(unittest.TestCase):
         ploomes_deal_direct_to_logistics_rules="110001615:110006379,110006380,110355350:110008939",
         bling_situacao_pronto_faturar=42,
     )
+
+    def setUp(self):
+        DealToBlingOrderSyncService._last_order_created_at.clear()
 
     def test_creates_sales_order_when_jump_recognized(self):
         settings = make_settings(**self.SETTINGS_KWARGS)
