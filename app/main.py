@@ -318,6 +318,22 @@ async def ploomes_deal_webhook(
     if parsed["action"] == "delete":
         return {"status": "ignored", "reason": "delete_nao_processado"}
 
+    # Trava manual temporaria: Deals aqui sao ignorados por completo pelo webhook
+    # (nenhuma regra de estagio roda). Usada quando um Deal que ja passou pelo
+    # processo precisa ser movido de estagio manualmente sem reacionar a
+    # automacao -- ex: mover pra Logistica so pra "aguardando" sem recriar/alterar
+    # o pedido no Bling. Ver PLOOMES_DEAL_AUTOMATION_SKIP_IDS no deploy.
+    skip_ids = {
+        item.strip()
+        for item in settings.ploomes_deal_automation_skip_ids.split(",")
+        if item.strip()
+    }
+    if parsed["deal_id"] in skip_ids:
+        logger.info(
+            "Webhook Ploomes Deal ignorado (skip manual) | deal_id=%s", parsed["deal_id"]
+        )
+        return {"status": "ignored", "reason": "automation_pausada_para_deal", "deal_id": parsed["deal_id"]}
+
     try:
         service = DealToBlingOrderSyncService(settings)
         # Registra a transicao de estagio incondicionalmente, antes de qualquer regra,

@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     ploomes_deal_direct_to_logistics_rules: str = (
         "110001615:110006379,110006380,110355350:110008939"
     )
+    # Deal ids (string, separados por virgula) ignorados por completo pelo webhook
+    # de Deal -- nenhuma regra roda. Trava manual temporaria pra mover um Deal de
+    # estagio sem reacionar a automacao Bling (deal que ja passou pelo processo).
+    ploomes_deal_automation_skip_ids: str = ""
 
     # Postgres (espelho local bling_produtos, bling_order_links, etc.)
     # Nao usado por nenhum caminho ao vivo do Cloud Run ainda -- ver plano (Risco B)
