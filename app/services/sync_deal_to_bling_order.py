@@ -714,20 +714,26 @@ class DealToBlingOrderSyncService:
 
     def _get_order_link(self, deal: dict[str, Any]) -> dict[str, Any] | None:
         # Fonte de verdade preferencial: campo do Deal no Ploomes (dispensa Postgres).
+        # Quando o campo esta configurado, ele decide sozinho: campo vazio = confirmado
+        # sem pedido (nao cai no fallback Postgres, que nao tem conectividade real com
+        # o Cloud Run -- ver _save_order_link, que pelo mesmo motivo nem tenta gravar
+        # la quando este campo esta configurado).
         field = self.settings.ploomes_deal_sales_order_id_field
         if field:
             raw = get_other_property(deal, field)
-            if raw not in (None, ""):
-                try:
-                    return {"bling_pedido_venda_id": int(raw), "bling_pedido_compra_id": None}
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "[LOGISTICS] Campo do pedido no Deal com valor invalido | deal_id=%s | %r",
-                        deal.get("Id"),
-                        raw,
-                    )
+            if raw in (None, ""):
+                return None
+            try:
+                return {"bling_pedido_venda_id": int(raw), "bling_pedido_compra_id": None}
+            except (TypeError, ValueError):
+                logger.warning(
+                    "[LOGISTICS] Campo do pedido no Deal com valor invalido | deal_id=%s | %r",
+                    deal.get("Id"),
+                    raw,
+                )
+                return None
 
-        # Fallback legado: bling_order_links (Postgres).
+        # Fallback legado (so quando o campo do Deal nao esta configurado): bling_order_links (Postgres).
         deal_id = deal.get("Id")
         try:
             conn = get_db_conn(self.settings)
