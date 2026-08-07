@@ -6,7 +6,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.clients.bling import BlingClient
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.logging_config import setup_logging
 from app.services.ploomes_webhook import parse_ploomes_deal_webhook, parse_ploomes_webhook
 from app.services.queue import ProductEventQueue
@@ -49,6 +49,35 @@ def _check_ploomes_validation_key(validation_key: str | None) -> None:
     expected = settings.ploomes_webhook_validation_key
     if expected and validation_key != expected:
         raise HTTPException(status_code=401, detail="ValidationKey invalida")
+
+
+def _check_deal_sync_config(settings: Settings) -> None:
+    # Trava de seguranca: se uma variavel critica do processo Deal->pedido Bling
+    # nao estiver configurada, o webhook bloqueia em vez de seguir e cair num
+    # fallback silencioso -- foi exatamente um campo vazio (PLOOMES_DEAL_SALES_
+    # ORDER_ID_FIELD) caindo no fallback Postgres (sem conectividade real no
+    # Cloud Run) que causou o incidente de pedidos duplicados do Deal 1107321216
+    # (2026-08-07). Preferimos parar tudo a arriscar duplicar pedido no Bling.
+    missing = [
+        name
+        for name, value in (
+            ("PLOOMES_DEAL_SALES_ORDER_ID_FIELD", settings.ploomes_deal_sales_order_id_field),
+            ("BLING_CLIENT_ID", settings.bling_client_id),
+            ("BLING_CLIENT_SECRET", settings.bling_client_secret),
+            ("PLOOMES_USER_KEY", settings.ploomes_user_key),
+            ("PLOOMES_WEBHOOK_VALIDATION_KEY", settings.ploomes_webhook_validation_key),
+        )
+        if not value
+    ]
+    if missing:
+        logger.error(
+            "[DEAL_ORDER] Processo travado: variaveis criticas ausentes | %s",
+            ", ".join(missing),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Configuracao critica ausente, processo travado: {', '.join(missing)}",
+        )
 
 
 def _elapsed_ms(started: float) -> int:
@@ -302,6 +331,7 @@ async def ploomes_deal_webhook(
     started = time.monotonic()
     settings = get_settings()
     _check_ploomes_validation_key(validation_key)
+    _check_deal_sync_config(settings)
 
     payload: dict[str, Any] = await request.json()
     parsed = parse_ploomes_deal_webhook(payload, settings.ploomes_deal_entity_id)
