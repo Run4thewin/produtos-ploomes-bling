@@ -11,7 +11,14 @@ substitutions:
   _SERVICE: produtos-ploomes-bling
   _QUEUE: ploomes-bling-products
   _PLOOMES_GROUP_ID: "1100000674"
-  _GCS_BUCKET: ""
+  # Bucket dedicado para o token OAuth do Bling (bling/tokens.json). Sem isso,
+  # o token era gravado no disco efemero do proprio container (FileTokenStore
+  # de fallback em app/clients/token_store.py) -- todo redeploy ou reinicio de
+  # instancia perdia o token renovado, e como o refresh_token do Bling e' de
+  # uso unico, qualquer renovacao feita fora (ex: rodando blng_fetcher local)
+  # invalidava o token que producao tinha guardado, causando invalid_grant.
+  # Criado 2026-08-13 apos o Deal 1106832863 falhar por esse motivo.
+  _GCS_BUCKET: "cmc-bling-tokens"
   _SERVICE_URL: ""
   _TASKS_SA: ""
   _PLOOMES_WEBHOOK_KEY: cmc-ploomes-bling-webhook
