@@ -477,23 +477,46 @@ class DealToBlingOrderSyncService:
             
             # 2. Carrega a quote do deal duplicado (itens que vao ficar de saldo)
             quote = self.ploomes.get_latest_quote_by_deal(deal["Id"])
-            if not quote:
-                raise DealOrderValidationError("Deal duplicado sem quote para calcular o faturamento parcial")
 
             # 3. Compara os itens e descobre se houve reducao
-            original_items = original_order.get("itens") or []
-            deal_payload = self._build_sales_order_payload(deal, quote)
-            deal_items = deal_payload.get("itens") or []
-            
-            items_to_invoice, items_to_keep = self._calculate_partial_billing_split(original_items, deal_items)
-            
+            # Usa so _build_items aqui (sem contato/forma de pagamento/pedido de compra
+            # do cliente) -- essa comparacao roda pra QUALQUER Deal que chega em
+            # Logistica com pedido ja vinculado, faturamento parcial ou nao. Exigir os
+            # campos completos de criacao de pedido aqui travava a atualizacao de
+            # situacao (o caso comum, sem faturamento parcial) sempre que o Deal nao
+            # tinha o campo "numero do pedido de compra do cliente" preenchido, mesmo
+            # sem precisar criar pedido nenhum. Ver DealToBlingOrderSyncService.
+            #
+            # Sem quote no Ploomes nao ha como comparar itens -- trata como "sem
+            # diferenca" e segue pro update de situacao normal em vez de abortar.
+            # A maioria dos Deals que chega aqui nao e faturamento parcial; travar
+            # a atualizacao de situacao inteira por falta de quote afetava qualquer
+            # Deal, nao so o caso de duplicado/saldo que essa checagem existe pra cobrir.
+            if quote:
+                original_items = original_order.get("itens") or []
+                deal_items, _deal_total = self._build_items(quote)
+                items_to_invoice, items_to_keep = self._calculate_partial_billing_split(
+                    original_items, deal_items
+                )
+            else:
+                logger.info(
+                    "[LOGISTICS] Deal %s sem quote no Ploomes -- pulando comparacao de "
+                    "faturamento parcial, seguindo com update de situacao normal.",
+                    deal.get("Id"),
+                )
+                items_to_invoice, items_to_keep = [], []
+
             if items_to_invoice:
                 logger.info(
                     "[LOGISTICS_PARTIAL] Diferenca de itens detectada para Deal %s. Faturando %s itens e mantendo %s itens no saldo.",
                     deal.get("Id"), len(items_to_invoice), len(items_to_keep)
                 )
-                
-                # Passo A e B: Cria novo pedido com itens a faturar e avanca situacao
+
+                # So agora, com faturamento parcial confirmado, monta o payload
+                # completo (contato, forma de pagamento, pedido de compra do
+                # cliente etc.) -- aqui sim um pedido novo vai ser criado no Bling
+                # e esses campos sao obrigatorios de verdade.
+                deal_payload = self._build_sales_order_payload(deal, quote)
                 new_payload = deal_payload.copy()
                 new_payload["itens"] = items_to_invoice
                 
