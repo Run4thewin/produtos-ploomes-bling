@@ -245,7 +245,21 @@ def run_entity_custom_range(bling: BlingClient, conn, spec: EntitySpec, *,
         final = (spec.incremental_param_final or spec.window_param_final
                  or param.replace("Inicial", "Final"))
         extra_params[param] = since
-        extra_params[final] = until
+        until_value = until
+        # "dataEmissaoInicial/Final" (nfe, nfe_entrada, nfce) carrega horario
+        # (ex.: dataEmissao "2026-08-12 16:23:58"); o Bling trata um "Final"
+        # so-com-data como 00:00:00 daquele dia, entao since==until vira uma
+        # janela de largura zero e NUNCA bate com nada emitido apos a meia-
+        # noite -- na pratica, a carga diaria (--since ontem --until ontem)
+        # sempre voltava 0 registros para essas entidades. Confirmado via
+        # probe direto em 2026-08-13 (mesmo dia com janela alargada retorna
+        # registros normalmente). Empurra o Final 1 dia pra cobrir o dia
+        # inteiro; demais parametros (dataAlteracao, dataVencimento,
+        # dataInicial/Final de pedidos) ja functionam com since==until e
+        # ficam como estavam.
+        if "Emissao" in param:
+            until_value = (_parse_date(until) + timedelta(days=1)).isoformat()
+        extra_params[final] = until_value
     else:
         logger.warning(
             "[%s] API do Bling nao suporta filtro de data para esta entidade; "

@@ -145,13 +145,14 @@ ENTITIES: list[Entity] = [
         tab="NF-e",
         headers=[
             "ID Bling", "NF Número", "NF Série", "Status", "Status Raw",
-            "Valor (R$)", "Valor Frete (R$)", "Data Emissão", "Data Operação",
+            "Valor (R$)", "Valor Frete (R$)", "Data Emissão", "Hora Emissão", "Data Operação",
             "Criado em", "Atualizado em",
             "Chave de Acesso", "Tipo", "Tipo Nota", "Nº Pedido Loja",
-            "Optante Simples Nacional", "Vendedor ID", "Natureza Operação ID",
+            "Optante Simples Nacional", "Vendedor ID", "Vendedor Nome",
+            "Natureza Operação ID", "Natureza Operação",
             "Link PDF", "Link DANFE",
             "Frete Por Conta", "Transportadora", "CNPJ Transportadora",
-            "Parcelas (Pagamento)",
+            "Parcelas (Pagamento)", "Intermediador CNPJ", "Intermediador Usuário",
             "Contact ID", "Nome Contato", "Documento", "Tipo Pessoa",
             "Fornecedor", "Cliente", "E-mail", "Telefone", "Cidade", "UF",
             "IE (na Nota)", "RG (na Nota)", "Endereço (na Nota)",
@@ -182,6 +183,7 @@ ENTITIES: list[Entity] = [
                 n.total,
                 (n.raw_json::jsonb ->> 'valorFrete')::numeric,
                 n.issue_date,
+                to_char(NULLIF(n.raw_json::jsonb ->> 'dataEmissao', '')::timestamp, 'HH24:MI:SS'),
                 NULLIF(n.raw_json::jsonb ->> 'dataOperacao', '0000-00-00 00:00:00'),
                 n.created_at,
                 n.updated_at,
@@ -191,13 +193,17 @@ ENTITIES: list[Entity] = [
                 NULLIF(n.raw_json::jsonb ->> 'numeroPedidoLoja', ''),
                 (n.raw_json::jsonb ->> 'optanteSimplesNacional')::boolean,
                 NULLIF((n.raw_json::jsonb -> 'vendedor' ->> 'id'), '0'),
+                vend.contato_nome,
                 NULLIF((n.raw_json::jsonb -> 'naturezaOperacao' ->> 'id'), '0'),
+                nat.descricao,
                 NULLIF(n.raw_json::jsonb ->> 'linkPDF', ''),
                 NULLIF(n.raw_json::jsonb ->> 'linkDanfe', ''),
                 NULLIF(n.raw_json::jsonb -> 'transporte' ->> 'fretePorConta', ''),
                 NULLIF(n.raw_json::jsonb -> 'transporte' -> 'transportador' ->> 'nome', ''),
                 NULLIF(n.raw_json::jsonb -> 'transporte' -> 'transportador' ->> 'numeroDocumento', ''),
                 parcelas.resumo,
+                NULLIF(n.raw_json::jsonb -> 'intermediador' ->> 'cnpj', ''),
+                NULLIF(n.raw_json::jsonb -> 'intermediador' ->> 'nomeUsuario', ''),
                 n.contact_id::text,
                 COALESCE(c.name, n.contact_name),
                 c.document,
@@ -253,13 +259,20 @@ ENTITIES: list[Entity] = [
                 NULLIF(item.data ->> 'informacoesAdicionais', '')
             FROM bling_nfe n
             LEFT JOIN bling_contacts c ON c.id = n.contact_id
+            LEFT JOIN bling_vendedores vend
+                ON vend.id = NULLIF((n.raw_json::jsonb -> 'vendedor' ->> 'id'), '0')::bigint
+            LEFT JOIN bling_naturezas_operacao nat
+                ON nat.id = NULLIF((n.raw_json::jsonb -> 'naturezaOperacao' ->> 'id'), '0')::bigint
             LEFT JOIN LATERAL (
                 SELECT string_agg(
                     COALESCE(to_char(NULLIF(p ->> 'data', '0000-00-00')::date, 'DD/MM/YYYY'), p ->> 'data')
-                        || ': R$ ' || to_char((p ->> 'valor')::numeric, 'FM999G999G990D00'),
+                        || ': R$ ' || to_char((p ->> 'valor')::numeric, 'FM999G999G990D00')
+                        || COALESCE(' (' || fp.descricao || ')', ''),
                     ' | ' ORDER BY p ->> 'data'
                 ) AS resumo
                 FROM jsonb_array_elements(COALESCE(n.raw_json::jsonb -> 'parcelas', '[]'::jsonb)) AS p
+                LEFT JOIN bling_formas_pagamentos fp
+                    ON fp.id = NULLIF((p -> 'formaPagamento' ->> 'id'), '0')::bigint
             ) parcelas ON true
             CROSS JOIN LATERAL jsonb_array_elements(
                 CASE WHEN jsonb_array_length(COALESCE(n.raw_json::jsonb -> 'itens', '[]'::jsonb)) > 0
