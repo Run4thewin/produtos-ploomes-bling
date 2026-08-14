@@ -591,13 +591,111 @@ class DealToBlingOrderSyncService:
 
         if situacao_id:
              self._update_order_link_situacao(deal["Id"], situacao_id)
-             
+
+        self._notify_logistics_email(deal, sales_order_id)
+
         return {
             "action": "situacao_atualizada",
             "deal_id": deal.get("Id"),
             "bling_order_id": sales_order_id,
             "situacao_id": situacao_id,
         }
+
+    def _notify_logistics_email(self, deal: dict[str, Any], sales_order_id: int) -> None:
+        # Best-effort: falha ao notificar nao pode derrubar a atualizacao real de
+        # situacao, que ja aconteceu com sucesso quando isto e' chamado.
+        if not self.settings.send_mail_service_url:
+            return
+        try:
+            order = self.bling.get_sales_order(sales_order_id)
+            html = self._build_logistics_email_html(deal, order)
+            deal_id = deal.get("Id")
+            numero = order.get("numero") or sales_order_id
+            response = httpx.post(
+                self.settings.send_mail_service_url.rstrip("/") + "/send-email",
+                json={
+                    "to": [self.settings.logistics_notification_email_to],
+                    "subject": f"Pedido {numero} entrou em Logistica -- {deal.get('Title', '')}",
+                    "html": html,
+                },
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            logger.info(
+                "[LOGISTICS_EMAIL] Notificacao enviada | deal_id=%s pedido=%s",
+                deal_id,
+                sales_order_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - notificacao nunca pode propagar erro
+            logger.warning(
+                "[LOGISTICS_EMAIL] Falha ao enviar notificacao | deal_id=%s pedido=%s | %s",
+                deal.get("Id"),
+                sales_order_id,
+                exc,
+            )
+
+    def _build_logistics_email_html(
+        self, deal: dict[str, Any], order: dict[str, Any]
+    ) -> str:
+        deal_id = deal.get("Id")
+        contact = deal.get("Contact") or {}
+        contact_name = contact.get("Name") or deal.get("ContactName") or "-"
+        numero = order.get("numero") or "-"
+        order_id = order.get("id") or ""
+        situacao = (order.get("situacao") or {}).get("valor") or "-"
+        total = order.get("total")
+        total_fmt = f"R$ {float(total):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if total is not None else "-"
+
+        deal_link = f"{self.settings.ploomes_web_base_url}/deal/{deal_id}"
+        bling_link = f"https://www.bling.com.br/vendas.php#edit/{order_id}" if order_id else ""
+
+        rows = []
+        for raw_item in order.get("itens") or []:
+            item = raw_item.get("item") if isinstance(raw_item.get("item"), dict) else raw_item
+            descricao = item.get("descricao") or item.get("codigo") or "-"
+            qtd = item.get("quantidade") or 0
+            valor_unit = item.get("valor") or item.get("valorunidade") or 0
+            try:
+                subtotal = float(qtd) * float(valor_unit)
+            except (TypeError, ValueError):
+                subtotal = 0
+            rows.append(
+                f"<tr>"
+                f"<td style='padding:4px 8px;border:1px solid #ddd'>{descricao}</td>"
+                f"<td style='padding:4px 8px;border:1px solid #ddd;text-align:right'>{qtd}</td>"
+                f"<td style='padding:4px 8px;border:1px solid #ddd;text-align:right'>R$ {float(valor_unit):,.2f}</td>"
+                f"<td style='padding:4px 8px;border:1px solid #ddd;text-align:right'>R$ {subtotal:,.2f}</td>"
+                f"</tr>"
+            )
+        items_table = (
+            "<table style='border-collapse:collapse;margin-top:8px'>"
+            "<tr style='background:#f2f2f2'>"
+            "<th style='padding:4px 8px;border:1px solid #ddd'>Item</th>"
+            "<th style='padding:4px 8px;border:1px solid #ddd'>Qtd</th>"
+            "<th style='padding:4px 8px;border:1px solid #ddd'>Valor Unit.</th>"
+            "<th style='padding:4px 8px;border:1px solid #ddd'>Subtotal</th>"
+            "</tr>" + "".join(rows) + "</table>"
+        ) if rows else "<p><em>Sem itens retornados pelo Bling.</em></p>"
+
+        links_html = f"<p><a href='{deal_link}'>Abrir Deal no Ploomes</a>"
+        if bling_link:
+            links_html += f" &nbsp;|&nbsp; <a href='{bling_link}'>Abrir pedido no Bling</a>"
+        links_html += "</p>"
+
+        return f"""
+        <div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+          <p>O pedido de venda abaixo acaba de entrar na etapa de <strong>Logistica</strong>.</p>
+          <table style='border-collapse:collapse;margin-top:8px'>
+            <tr><td style='padding:4px 8px;font-weight:bold'>Deal</td><td style='padding:4px 8px'>{deal.get('Title', '-')} (Id {deal_id})</td></tr>
+            <tr><td style='padding:4px 8px;font-weight:bold'>Cliente</td><td style='padding:4px 8px'>{contact_name}</td></tr>
+            <tr><td style='padding:4px 8px;font-weight:bold'>Pedido Bling</td><td style='padding:4px 8px'>{numero}</td></tr>
+            <tr><td style='padding:4px 8px;font-weight:bold'>Situacao</td><td style='padding:4px 8px'>{situacao}</td></tr>
+            <tr><td style='padding:4px 8px;font-weight:bold'>Valor total</td><td style='padding:4px 8px'>{total_fmt}</td></tr>
+          </table>
+          {items_table}
+          {links_html}
+        </div>
+        """
 
     def _calculate_partial_billing_split(self, original_items: list[dict[str, Any]], deal_items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         # Helper method to calculate the difference between the original bling order and the new deal (saldo)

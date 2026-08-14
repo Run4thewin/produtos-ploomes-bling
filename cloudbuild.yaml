@@ -79,7 +79,11 @@ steps:
       # ir pra Logistica manualmente sem reacionar a automacao (ja passou pelo
       # processo, e o pedido 9057/26438764111 vinculado a ele foi mexido durante
       # o loop). Remover este id daqui assim que o Deal for movido e confirmado.
-      - --update-env-vars=^@^USE_CLOUD_TASKS=true@GCP_PROJECT=$PROJECT_ID@CLOUD_TASKS_LOCATION=${_REGION}@CLOUD_TASKS_QUEUE=${_QUEUE}@PLOOMES_GROUP_ID=${_PLOOMES_GROUP_ID}@GCS_BUCKET=${_GCS_BUCKET}@SERVICE_URL=${_SERVICE_URL}@CLOUD_TASKS_SERVICE_ACCOUNT=${_TASKS_SA}@PLOOMES_WEBHOOK_VALIDATION_KEY=${_PLOOMES_WEBHOOK_KEY}@PLOOMES_PRODUCT_ENTITY_ID=10@BLING_TOKENS_PATH=bling/tokens.json@DB_HOST=${_DB_HOST}@DB_PORT=${_DB_PORT}@DB_NAME=${_DB_NAME}@DB_USER=${_DB_USER}@PLOOMES_DEAL_SALES_ORDER_ID_FIELD=deal_6454B19E-E39A-4909-BFD0-3CADB493D4D3@PLOOMES_DEAL_AUTOMATION_SKIP_IDS=1107214887
+      # SEND_MAIL_SERVICE_URL: servico HTTP dedicado (send_mail_cotacao_cmc, SMTP
+      # via no-reply-quote@cmcimportacao.com) usado pra notificar por e-mail
+      # quando o pedido de venda entra em Logistica com sucesso. Ver
+      # DealToBlingOrderSyncService._notify_logistics_email.
+      - --update-env-vars=^@^USE_CLOUD_TASKS=true@GCP_PROJECT=$PROJECT_ID@CLOUD_TASKS_LOCATION=${_REGION}@CLOUD_TASKS_QUEUE=${_QUEUE}@PLOOMES_GROUP_ID=${_PLOOMES_GROUP_ID}@GCS_BUCKET=${_GCS_BUCKET}@SERVICE_URL=${_SERVICE_URL}@CLOUD_TASKS_SERVICE_ACCOUNT=${_TASKS_SA}@PLOOMES_WEBHOOK_VALIDATION_KEY=${_PLOOMES_WEBHOOK_KEY}@PLOOMES_PRODUCT_ENTITY_ID=10@BLING_TOKENS_PATH=bling/tokens.json@DB_HOST=${_DB_HOST}@DB_PORT=${_DB_PORT}@DB_NAME=${_DB_NAME}@DB_USER=${_DB_USER}@PLOOMES_DEAL_SALES_ORDER_ID_FIELD=deal_6454B19E-E39A-4909-BFD0-3CADB493D4D3@PLOOMES_DEAL_AUTOMATION_SKIP_IDS=1107214887@SEND_MAIL_SERVICE_URL=https://send-mail-cotacao-cmc-b35slafrsa-uc.a.run.app
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:$COMMIT_SHA

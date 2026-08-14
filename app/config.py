@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     ploomes_deal_direct_to_logistics_rules: str = (
         "110001615:110006379,110006380,110355350:110008939"
     )
+    # Notificacao por e-mail quando o pedido de venda entra em Logistica com
+    # sucesso (situacao atualizada). Usa o servico HTTP send_mail_cotacao_cmc
+    # (SMTP via no-reply-quote@cmcimportacao.com) -- ver
+    # https://github.com/Run4thewin/send_mail_cotacao_cmc. Vazio = notificacao
+    # desativada (nao bloqueia o fluxo principal se a URL nao estiver configurada
+    # ou o envio falhar -- e' so um aviso, nao pode derrubar a atualizacao real).
+    send_mail_service_url: str = ""
+    logistics_notification_email_to: str = "gabriel.santos@cmcimportacao.com"
+
     # Deal ids (string, separados por virgula) ignorados por completo pelo webhook
     # de Deal -- nenhuma regra roda. Trava manual temporaria pra mover um Deal de
     # estagio sem reacionar a automacao Bling (deal que ja passou pelo processo).
