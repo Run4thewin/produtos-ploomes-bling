@@ -101,7 +101,10 @@ class Settings(BaseSettings):
     # desativada (nao bloqueia o fluxo principal se a URL nao estiver configurada
     # ou o envio falhar -- e' so um aviso, nao pode derrubar a atualizacao real).
     send_mail_service_url: str = ""
-    logistics_notification_email_to: str = "gabriel.santos@cmcimportacao.com"
+    # Varios enderecos separados por virgula.
+    logistics_notification_email_to: str = (
+        "logistica@cmcimportacao.com,gabriel.santos@cmcimportacao.com"
+    )
 
     # Deal ids (string, separados por virgula) ignorados por completo pelo webhook
     # de Deal -- nenhuma regra roda. Trava manual temporaria pra mover um Deal de

@@ -611,10 +611,15 @@ class DealToBlingOrderSyncService:
             html = self._build_logistics_email_html(deal, order)
             deal_id = deal.get("Id")
             numero = order.get("numero") or sales_order_id
+            recipients = [
+                addr.strip()
+                for addr in self.settings.logistics_notification_email_to.split(",")
+                if addr.strip()
+            ]
             response = httpx.post(
                 self.settings.send_mail_service_url.rstrip("/") + "/send-email",
                 json={
-                    "to": [self.settings.logistics_notification_email_to],
+                    "to": recipients,
                     "subject": f"Pedido {numero} entrou em Logistica -- {deal.get('Title', '')}",
                     "html": html,
                 },
