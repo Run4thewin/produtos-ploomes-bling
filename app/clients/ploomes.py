@@ -174,6 +174,16 @@ class PloomesClient:
             raise RuntimeError(f"Deal Ploomes nao encontrado: {deal_id}")
         return values[0]
 
+    def get_user_email(self, user_id: int | str) -> str | None:
+        response = self._request(
+            "GET",
+            "Users",
+            params={"$filter": f"Id eq {user_id}", "$top": 1},
+        )
+        self._raise_ploomes_error(response)
+        values = response.json().get("value", [])
+        return values[0].get("Email") if values else None
+
     def get_latest_quote_by_deal(self, deal_id: int | str) -> dict | None:
         response = self._request(
             "GET",

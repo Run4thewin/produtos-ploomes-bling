@@ -616,6 +616,9 @@ class DealToBlingOrderSyncService:
                 for addr in self.settings.logistics_notification_email_to.split(",")
                 if addr.strip()
             ]
+            owner_email = self._owner_email_for_deal(deal)
+            if owner_email and owner_email not in recipients:
+                recipients.append(owner_email)
             response = httpx.post(
                 self.settings.send_mail_service_url.rstrip("/") + "/send-email",
                 json={
@@ -1346,6 +1349,21 @@ class DealToBlingOrderSyncService:
             rules.append(StageRule(*(int(part) for part in parts)))
         return rules
 
+    def _owner_email_for_deal(self, deal: dict[str, Any]) -> str | None:
+        owner_id = deal.get("OwnerId")
+        if not owner_id:
+            return None
+        try:
+            return self.ploomes.get_user_email(owner_id)
+        except Exception as exc:  # noqa: BLE001 - nunca deve impedir a notificacao principal
+            logger.warning(
+                "[EMAIL] Falha ao buscar e-mail do responsavel | deal_id=%s owner_id=%s | %s",
+                deal.get("Id"),
+                owner_id,
+                exc,
+            )
+            return None
+
     def _mark_deal_error(self, deal_id: int | str, message: str) -> None:
         logger.info(
             "[DEAL_ORDER] Marcando Deal com erro | deal_id=%s error_stage_id=%s mensagem=%s",
@@ -1375,6 +1393,14 @@ class DealToBlingOrderSyncService:
             return
         try:
             deal_link = f"{self.settings.ploomes_web_base_url}/deal/{deal_id}"
+            recipients = ["gabriel.santos@cmcimportacao.com"]
+            try:
+                deal = self.ploomes.get_deal_by_id(deal_id)
+                owner_email = self._owner_email_for_deal(deal)
+                if owner_email and owner_email not in recipients:
+                    recipients.append(owner_email)
+            except Exception:  # noqa: BLE001 - falha ao achar responsavel nao impede o e-mail base
+                pass
             html = f"""
             <div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
               <p><strong>Falha na automacao Ploomes -&gt; Bling</strong> para o Deal {deal_id}.</p>
@@ -1389,7 +1415,7 @@ class DealToBlingOrderSyncService:
             response = httpx.post(
                 self.settings.send_mail_service_url.rstrip("/") + "/send-email",
                 json={
-                    "to": ["gabriel.santos@cmcimportacao.com"],
+                    "to": recipients,
                     "subject": f"[ERRO] Automacao Bling falhou -- Deal {deal_id}",
                     "html": html,
                 },
