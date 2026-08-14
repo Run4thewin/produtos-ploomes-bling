@@ -1365,6 +1365,44 @@ class DealToBlingOrderSyncService:
                 ],
             },
         )
+        self._notify_error_email(deal_id, message)
+
+    def _notify_error_email(self, deal_id: int | str, message: str) -> None:
+        # Best-effort, mesma logica de _notify_logistics_email: notificar nunca
+        # pode derrubar o fluxo principal (o Deal ja foi marcado com erro acima,
+        # independente do envio de e-mail funcionar ou nao).
+        if not self.settings.send_mail_service_url:
+            return
+        try:
+            deal_link = f"{self.settings.ploomes_web_base_url}/deal/{deal_id}"
+            html = f"""
+            <div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+              <p><strong>Falha na automacao Ploomes -&gt; Bling</strong> para o Deal {deal_id}.</p>
+              <table style='border-collapse:collapse;margin-top:8px'>
+                <tr><td style='padding:4px 8px;font-weight:bold'>Deal</td><td style='padding:4px 8px'><a href='{deal_link}'>{deal_link}</a></td></tr>
+                <tr><td style='padding:4px 8px;font-weight:bold'>Erro</td><td style='padding:4px 8px'>{message[:1000]}</td></tr>
+              </table>
+              <p><em>O Deal foi movido para o estagio de erro e o motivo foi salvo no campo do Deal.
+              Esta automacao nao vai tentar de novo sozinha ate o Deal mudar de estagio.</em></p>
+            </div>
+            """
+            response = httpx.post(
+                self.settings.send_mail_service_url.rstrip("/") + "/send-email",
+                json={
+                    "to": ["gabriel.santos@cmcimportacao.com"],
+                    "subject": f"[ERRO] Automacao Bling falhou -- Deal {deal_id}",
+                    "html": html,
+                },
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            logger.info("[ERROR_EMAIL] Notificacao de erro enviada | deal_id=%s", deal_id)
+        except Exception as exc:  # noqa: BLE001 - notificacao nunca pode propagar erro
+            logger.warning(
+                "[ERROR_EMAIL] Falha ao enviar notificacao de erro | deal_id=%s | %s",
+                deal_id,
+                exc,
+            )
 
     def _mark_deal_success(
         self,
