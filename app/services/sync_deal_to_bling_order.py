@@ -577,7 +577,7 @@ class DealToBlingOrderSyncService:
             else:
                 # Fluxo normal, sem faturamento parcial
                 if situacao_id:
-                    self.bling.update_sales_order_situacao(sales_order_id, situacao_id)
+                    self._update_situacao_tolerando_mesma_situacao(sales_order_id, situacao_id)
 
         except DealOrderValidationError as exc:
              logger.warning("[LOGISTICS] Erro de validacao Deal %s: %s", deal.get("Id"), exc)
@@ -593,6 +593,15 @@ class DealToBlingOrderSyncService:
 
         if situacao_id:
              self._update_order_link_situacao(deal["Id"], situacao_id)
+
+        # Garante que o campo do Deal mostre o link do pedido, nao o motivo de
+        # um erro anterior (ver _mark_deal_error -- grava no mesmo campo). Toda
+        # vez que a situacao e' confirmada com sucesso aqui (incluindo o caso
+        # "ja estava na situacao certa"), restaura/reafirma o link -- mas so' se
+        # o campo estiver realmente diferente, pra nao gerar um PATCH (e portanto
+        # um novo webhook) a cada processamento sem necessidade real (ver
+        # incidente do Deal 1107321216 no topo do arquivo).
+        self._restore_order_link_field(deal, sales_order_id, original_order.get("numero"))
 
         self._notify_logistics_email(deal, sales_order_id)
 
@@ -972,6 +981,44 @@ class DealToBlingOrderSyncService:
         except Exception as exc:
             logger.warning(
                 "[LOGISTICS] Falha ao atualizar bling_order_links | deal_id=%s | %s", deal_id, exc
+            )
+
+    def _restore_order_link_field(
+        self, deal: dict[str, Any], order_id: int | str, order_number: Any
+    ) -> None:
+        # Best-effort: se falhar, o pior caso e' o campo continuar com o que
+        # tinha antes -- nunca deve derrubar o fluxo principal, que ja
+        # completou com sucesso quando isto e' chamado.
+        deal_id = deal.get("Id")
+        try:
+            order_reference = (
+                f"Pedido Bling {order_number or order_id}: "
+                f"https://www.bling.com.br/vendas.php#edit/{order_id}"
+            )
+            current = get_other_property(deal, self.settings.ploomes_deal_order_field)
+            if current == order_reference:
+                return
+            self.ploomes.update_deal(
+                deal_id,
+                {
+                    "OtherProperties": [
+                        {
+                            "FieldKey": self.settings.ploomes_deal_order_field,
+                            "StringValue": order_reference,
+                        }
+                    ],
+                },
+            )
+            logger.info(
+                "[LOGISTICS] Link do pedido restaurado no campo do Deal | deal_id=%s pedido=%s",
+                deal_id,
+                order_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[LOGISTICS] Falha ao restaurar link do pedido no campo do Deal | deal_id=%s | %s",
+                deal_id,
+                exc,
             )
 
     def _find_purchase_trigger_rule(self, deal: dict[str, Any]) -> PurchaseTriggerRule | None:
@@ -1528,6 +1575,34 @@ class DealToBlingOrderSyncService:
 
     def _apply_discount(self, price: float, discount_percent: float) -> float:
         return price - (price * (discount_percent / 100))
+
+    def _is_same_situacao_error(self, exc: httpx.HTTPStatusError) -> bool:
+        # Bling recusa PATCH de situacao pra uma situacao igual a atual (erro de
+        # validacao, nao um no-op silencioso). Do ponto de vista da automacao isso
+        # nao e' uma falha: o resultado desejado (pedido na situacao X) ja foi
+        # alcancado, so' nao foi ESTA chamada que fez. Tratar como erro real
+        # levava o Deal pra pendencia e sobrescrevia o link do pedido no campo
+        # do Deal com a mensagem de erro (ver Deal 1107128022, pedido 8978).
+        try:
+            body = exc.response.json()
+        except ValueError:
+            return False
+        fields = (body.get("error") or {}).get("fields") or []
+        return any("mesma situa" in (f.get("msg") or "").lower() for f in fields)
+
+    def _update_situacao_tolerando_mesma_situacao(
+        self, order_id: int | str, situacao_id: int
+    ) -> None:
+        try:
+            self.bling.update_sales_order_situacao(order_id, situacao_id)
+        except httpx.HTTPStatusError as exc:
+            if not self._is_same_situacao_error(exc):
+                raise
+            logger.info(
+                "[LOGISTICS] Pedido %s ja estava na situacao %s -- nada a fazer.",
+                order_id,
+                situacao_id,
+            )
 
     def _describe_bling_http_error(self, exc: httpx.HTTPStatusError) -> str:
         try:
