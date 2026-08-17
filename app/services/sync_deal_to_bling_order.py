@@ -470,6 +470,7 @@ class DealToBlingOrderSyncService:
             }
 
         sales_order_id = link["bling_pedido_venda_id"]
+        partial_billing_info: dict[str, Any] | None = None
 
         try:
             # 1. Carrega o pedido original
@@ -503,6 +504,26 @@ class DealToBlingOrderSyncService:
                     "[LOGISTICS] Deal %s sem quote no Ploomes -- pulando comparacao de "
                     "faturamento parcial, seguindo com update de situacao normal.",
                     deal.get("Id"),
+                )
+                items_to_invoice, items_to_keep = [], []
+
+            # Trava definitiva contra duplicidade: se esse Deal ja tem um pedido
+            # de faturamento parcial registrado, nao cria outro -- mesmo que a
+            # comparacao de itens ache diferenca de novo (webhook repetido, ou
+            # o pedido original nao ter sido reduzido por algum motivo). Sem
+            # isso, o Deal 1107214381 triplicou pedido (9055, 9391, 9392): cada
+            # webhook novo recalculava a mesma diferenca e criava outro pedido.
+            # Pra um novo faturamento parcial legitimo, apague o valor do campo
+            # ploomes_deal_partial_billing_order_field manualmente no Deal.
+            already_billed_order = get_other_property(
+                deal, self.settings.ploomes_deal_partial_billing_order_field
+            )
+            if items_to_invoice and already_billed_order:
+                logger.warning(
+                    "[LOGISTICS_PARTIAL] Deal %s ja tem pedido de faturamento parcial "
+                    "(%s) -- ignorando diferenca de itens detectada de novo, sem criar "
+                    "outro pedido.",
+                    deal.get("Id"), already_billed_order,
                 )
                 items_to_invoice, items_to_keep = [], []
 
@@ -541,6 +562,20 @@ class DealToBlingOrderSyncService:
                 new_order_id = created_new.get("id")
                 if new_order_id:
                      self._record_order_creation(deal["Id"])
+                     # Trava definitiva contra duplicidade (ver comentario acima):
+                     # grava ANTES de qualquer outra chamada que possa falhar, pra
+                     # nunca ficar num estado "pedido criado mas trava nao setada".
+                     self.ploomes.update_deal(
+                          deal["Id"],
+                          {
+                               "OtherProperties": [
+                                    {
+                                         "FieldKey": self.settings.ploomes_deal_partial_billing_order_field,
+                                         "StringValue": str(new_order_id),
+                                    }
+                               ],
+                          },
+                     )
                      if self.settings.bling_situacao_em_processo_compra:
                           self._advance_sales_order_situacao(new_order_id, self.settings.bling_situacao_em_processo_compra)
                      if situacao_id:
@@ -560,6 +595,13 @@ class DealToBlingOrderSyncService:
                      # Atualizamos no banco legacy caso precise
                      self._save_order_link(deal["Id"], new_order_id, None)
 
+                     partial_billing_info = {
+                          "new_order_id": new_order_id,
+                          "new_order_number": new_order.get("numero"),
+                          "invoiced_count": len(items_to_invoice),
+                          "kept_count": len(items_to_keep),
+                          "original_order_number": original_order.get("numero"),
+                     }
                      logger.info("[LOGISTICS_PARTIAL] Novo pedido criado para faturamento parcial: %s", new_order_id)
                 
                 # Passo C: Atualiza o pedido original para manter apenas o saldo
@@ -624,7 +666,7 @@ class DealToBlingOrderSyncService:
         # incidente do Deal 1107321216 no topo do arquivo).
         self._restore_order_link_field(deal, sales_order_id, original_order.get("numero"))
 
-        self._notify_logistics_email(deal, sales_order_id)
+        self._notify_logistics_email(deal, sales_order_id, partial_billing_info)
 
         return {
             "action": "situacao_atualizada",
@@ -633,14 +675,19 @@ class DealToBlingOrderSyncService:
             "situacao_id": situacao_id,
         }
 
-    def _notify_logistics_email(self, deal: dict[str, Any], sales_order_id: int) -> None:
+    def _notify_logistics_email(
+        self,
+        deal: dict[str, Any],
+        sales_order_id: int,
+        partial_billing_info: dict[str, Any] | None = None,
+    ) -> None:
         # Best-effort: falha ao notificar nao pode derrubar a atualizacao real de
         # situacao, que ja aconteceu com sucesso quando isto e' chamado.
         if not self.settings.send_mail_service_url:
             return
         try:
             order = self.bling.get_sales_order(sales_order_id)
-            html = self._build_logistics_email_html(deal, order)
+            html = self._build_logistics_email_html(deal, order, partial_billing_info)
             deal_id = deal.get("Id")
             numero = order.get("numero") or sales_order_id
             recipients = [
@@ -651,11 +698,14 @@ class DealToBlingOrderSyncService:
             owner_email = self._owner_email_for_deal(deal)
             if owner_email and owner_email not in recipients:
                 recipients.append(owner_email)
+            subject = f"Pedido {numero} entrou em Logistica -- {deal.get('Title', '')}"
+            if partial_billing_info:
+                subject = f"[Faturamento parcial] {subject}"
             response = httpx.post(
                 self.settings.send_mail_service_url.rstrip("/") + "/send-email",
                 json={
                     "to": recipients,
-                    "subject": f"Pedido {numero} entrou em Logistica -- {deal.get('Title', '')}",
+                    "subject": subject,
                     "html": html,
                 },
                 timeout=15.0,
@@ -675,7 +725,10 @@ class DealToBlingOrderSyncService:
             )
 
     def _build_logistics_email_html(
-        self, deal: dict[str, Any], order: dict[str, Any]
+        self,
+        deal: dict[str, Any],
+        order: dict[str, Any],
+        partial_billing_info: dict[str, Any] | None = None,
     ) -> str:
         deal_id = deal.get("Id")
         contact = deal.get("Contact") or {}
@@ -722,9 +775,22 @@ class DealToBlingOrderSyncService:
             links_html += f" &nbsp;|&nbsp; <a href='{bling_link}'>Abrir pedido no Bling</a>"
         links_html += "</p>"
 
+        partial_html = ""
+        if partial_billing_info:
+            partial_html = f"""
+          <div style="background:#fff3cd;border:1px solid #ffe08a;border-radius:4px;padding:10px 14px;margin-top:10px">
+            <p style="margin:0 0 6px"><strong>Faturamento parcial</strong> -- este pedido cobre so' parte da venda.</p>
+            <p style="margin:0">
+              {partial_billing_info.get('invoiced_count')} item(ns) faturado(s) aqui (pedido {partial_billing_info.get('new_order_number')}).<br/>
+              {partial_billing_info.get('kept_count')} item(ns) continuam no saldo, no pedido original {partial_billing_info.get('original_order_number')}.
+            </p>
+          </div>
+          """
+
         return f"""
         <div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
           <p>O pedido de venda abaixo acaba de entrar na etapa de <strong>Logistica</strong>.</p>
+          {partial_html}
           <table style='border-collapse:collapse;margin-top:8px'>
             <tr><td style='padding:4px 8px;font-weight:bold'>Deal</td><td style='padding:4px 8px'>{deal.get('Title', '-')} (Id {deal_id})</td></tr>
             <tr><td style='padding:4px 8px;font-weight:bold'>Cliente</td><td style='padding:4px 8px'>{contact_name}</td></tr>
