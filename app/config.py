@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     )
     ploomes_deal_error_stage_id: int = 110070771
     ploomes_deal_order_field: str = "deal_50071B8C-A01B-49C1-83D3-AA666C588A95"
+    # Campo dedicado (criado 2026-08-17) so' pro motivo de erro -- antes usava o
+    # mesmo campo do link do pedido, e um erro apagava o link de um pedido que
+    # ja existia e estava correto (ver Deal 1107128022).
+    ploomes_deal_error_field: str = "deal_C4A8DDBA-4D61-41D4-82F4-F23EC2D20016"
     ploomes_deal_purchase_order_field: str = "deal_943CBBDC-AF6A-47DD-8AC0-A6E039BFB82C"
     ploomes_deal_payment_method_field: str = "deal_BFAEEEE4-2B09-4420-87BE-30C7C375C93B"
     ploomes_deal_payment_days_field: str = "deal_429C6DEE-E08F-4D96-844B-CA8FDB433EC8"

@@ -563,9 +563,30 @@ class DealToBlingOrderSyncService:
                      logger.info("[LOGISTICS_PARTIAL] Novo pedido criado para faturamento parcial: %s", new_order_id)
                 
                 # Passo C: Atualiza o pedido original para manter apenas o saldo
+                #
+                # update_sales_order faz PUT /pedidos/vendas/{id} -- a API do
+                # Bling exige o objeto completo nesse verbo, nao aceita um PUT
+                # so' com "itens" (o Bling recusava com "contato: Id do contato
+                # da venda e' obrigatorio, contato: O cliente nao foi
+                # preenchido, data: A data para geracao das parcelas e'
+                # invalida", mesmo com o Deal com contato/dados validos --
+                # ver Deal 1107214381). Reaproveita deal_payload (ja' montado
+                # e valido, mesmo formato usado pra criar new_payload acima),
+                # so' trocando os itens pro saldo e recalculando as parcelas
+                # pro novo total, menor.
                 if items_to_keep:
-                    update_payload = {"itens": items_to_keep}
-                    # Opcionalmente recalcular parcelas do pedido original aqui se a API do Bling exigir para PUT.
+                    update_payload = deal_payload.copy()
+                    update_payload["itens"] = items_to_keep
+                    total_to_keep = sum(
+                        float(item.get("quantidade") or 0) * float(item.get("valor") or 0)
+                        for item in items_to_keep
+                    )
+                    if freight_value is not None:
+                        total_to_keep += float(freight_value)
+                    if payment_method_id:
+                        update_payload["parcelas"] = self._build_installments(
+                            total_to_keep, payment_days, payment_method_id
+                        )
                     self.bling.update_sales_order(sales_order_id, update_payload)
                     logger.info("[LOGISTICS_PARTIAL] Pedido original %s atualizado com o saldo de %s itens.", sales_order_id, len(items_to_keep))
                 
@@ -1426,8 +1447,8 @@ class DealToBlingOrderSyncService:
                 "StageId": self.settings.ploomes_deal_error_stage_id,
                 "OtherProperties": [
                     {
-                        "FieldKey": self.settings.ploomes_deal_order_field,
-                        "StringValue": message[:500],
+                        "FieldKey": self.settings.ploomes_deal_error_field,
+                        "StringValue": message[:250],
                     }
                 ],
             },
