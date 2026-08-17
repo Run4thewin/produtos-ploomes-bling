@@ -493,18 +493,32 @@ class DealToBlingOrderSyncService:
             # A maioria dos Deals que chega aqui nao e faturamento parcial; travar
             # a atualizacao de situacao inteira por falta de quote afetava qualquer
             # Deal, nao so o caso de duplicado/saldo que essa checagem existe pra cobrir.
-            if quote:
+            # DESATIVADO 2026-08-17: a comparacao disparava faturamento parcial
+            # (e criava pedido novo no Bling) toda vez que achava QUALQUER
+            # diferenca entre os itens do pedido e a quote mais recente -- mesmo
+            # sem ninguem ter alterado a proposta de proposito (uma quote
+            # revisada por outro motivo, ou o proprio pedido novo do
+            # faturamento parcial anterior, já bastava pra "detectar diferenca"
+            # de novo). Isso causou o Deal 1107214381 triplicar pedido (9055,
+            # 9391, 9392). Faturamento parcial de verdade e' "se precisar fazer
+            # o processo de alterar quantidade na proposta" -- uma acao
+            # deliberada, nao um efeito colateral. Ate definirmos o sinal
+            # correto pra isso (settings.logistics_partial_billing_enabled),
+            # fica sempre desligado: nunca cria pedido novo sozinho aqui, so'
+            # atualiza a situacao do pedido que ja existe.
+            if quote and self.settings.logistics_partial_billing_enabled:
                 original_items = original_order.get("itens") or []
                 deal_items, _deal_total = self._build_items(quote)
                 items_to_invoice, items_to_keep = self._calculate_partial_billing_split(
                     original_items, deal_items
                 )
             else:
-                logger.info(
-                    "[LOGISTICS] Deal %s sem quote no Ploomes -- pulando comparacao de "
-                    "faturamento parcial, seguindo com update de situacao normal.",
-                    deal.get("Id"),
-                )
+                if not quote:
+                    logger.info(
+                        "[LOGISTICS] Deal %s sem quote no Ploomes -- pulando comparacao de "
+                        "faturamento parcial, seguindo com update de situacao normal.",
+                        deal.get("Id"),
+                    )
                 items_to_invoice, items_to_keep = [], []
 
             # Trava definitiva contra duplicidade: se esse Deal ja tem um pedido
