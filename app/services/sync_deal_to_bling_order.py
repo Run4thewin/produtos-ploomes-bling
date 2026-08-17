@@ -581,12 +581,14 @@ class DealToBlingOrderSyncService:
 
         except DealOrderValidationError as exc:
              logger.warning("[LOGISTICS] Erro de validacao Deal %s: %s", deal.get("Id"), exc)
+             self._mark_deal_error(deal["Id"], str(exc))
              return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": str(exc)}
         except httpx.HTTPStatusError as exc:
             reason = self._describe_bling_http_error(exc)
             logger.warning(
                 "[LOGISTICS] Falha ao interagir com Bling para pedido %s: %s", sales_order_id, reason
             )
+            self._mark_deal_error(deal["Id"], reason)
             return {"action": "error_registered", "deal_id": deal.get("Id"), "reason": reason}
 
         if situacao_id:
