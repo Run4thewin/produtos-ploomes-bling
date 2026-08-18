@@ -1677,19 +1677,28 @@ class DealToBlingOrderSyncService:
     def _apply_discount(self, price: float, discount_percent: float) -> float:
         return price - (price * (discount_percent / 100))
 
-    def _is_same_situacao_error(self, exc: httpx.HTTPStatusError) -> bool:
-        # Bling recusa PATCH de situacao pra uma situacao igual a atual (erro de
-        # validacao, nao um no-op silencioso). Do ponto de vista da automacao isso
-        # nao e' uma falha: o resultado desejado (pedido na situacao X) ja foi
-        # alcancado, so' nao foi ESTA chamada que fez. Tratar como erro real
-        # levava o Deal pra pendencia e sobrescrevia o link do pedido no campo
-        # do Deal com a mensagem de erro (ver Deal 1107128022, pedido 8978).
+    def _is_situacao_change_moot(self, exc: httpx.HTTPStatusError) -> bool:
+        # Bling recusa o PATCH de situacao em dois casos que, do ponto de vista
+        # da automacao, NAO sao falha real:
+        #   1. "mesma situacao" -- o pedido ja esta na situacao alvo.
+        #   2. "nao ha transicoes definidas" -- o pedido ja avancou pra uma
+        #      situacao MAIS A FRENTE (ex: "Atendido") do que o alvo
+        #      ("Pronto Para Faturar"), e o Bling nao permite andar pra tras
+        #      no fluxo de situacoes. Ver Deal 1107284509, pedido 8986.
+        # Nos dois casos, insistir nunca vai funcionar (a transicao pedida
+        # simplesmente nao existe) -- so' teria efeito colateral ruim: gerar
+        # pendencia + e-mail de erro repetido pra algo que nunca vai se
+        # resolver sozinho e nao precisa de acao nenhuma no Bling.
         try:
             body = exc.response.json()
         except ValueError:
             return False
         fields = (body.get("error") or {}).get("fields") or []
-        return any("mesma situa" in (f.get("msg") or "").lower() for f in fields)
+        messages = [(f.get("msg") or "").lower() for f in fields]
+        return any(
+            "mesma situa" in msg or ("transi" in msg and "definid" in msg)
+            for msg in messages
+        )
 
     def _update_situacao_tolerando_mesma_situacao(
         self, order_id: int | str, situacao_id: int
@@ -1697,10 +1706,10 @@ class DealToBlingOrderSyncService:
         try:
             self.bling.update_sales_order_situacao(order_id, situacao_id)
         except httpx.HTTPStatusError as exc:
-            if not self._is_same_situacao_error(exc):
+            if not self._is_situacao_change_moot(exc):
                 raise
             logger.info(
-                "[LOGISTICS] Pedido %s ja estava na situacao %s -- nada a fazer.",
+                "[LOGISTICS] Pedido %s ja esta na situacao %s ou passou dela -- nada a fazer.",
                 order_id,
                 situacao_id,
             )
