@@ -1,4 +1,5 @@
 import logging
+import re
 import threading
 import time
 import unicodedata
@@ -1456,9 +1457,20 @@ class DealToBlingOrderSyncService:
         raw_parts = [part.strip() for part in days.split("/") if part.strip()]
         if not raw_parts:
             raw_parts = ["0"]
+        # O campo de prazo no Ploomes e' texto livre preenchido a mao -- as
+        # vezes vem "45 DIAS", "30 dias", "A VISTA" etc em vez de so' o
+        # numero. Extrai o primeiro numero de cada parte em vez de exigir que
+        # a string inteira seja um float puro; ausencia de numero vira 0 (que
+        # a linha abaixo ja trata como 1 dia). Sem isto, um Deal com esse
+        # campo preenchido em texto quebrava a criacao do pedido inteira com
+        # ValueError nao tratado -- nunca chegava em _mark_deal_error, o Deal
+        # ficava sem nenhum sinal de erro visivel (ver Deal 1107429295).
         # Bling nao aceita parcela com vencimento no mesmo dia da emissao;
         # prazo 0 sempre vira 1 dia, para qualquer forma de pagamento.
-        parts = [int(float(part)) or 1 for part in raw_parts]
+        parts = []
+        for part in raw_parts:
+            match = re.search(r"\d+", part)
+            parts.append((int(match.group()) if match else 0) or 1)
 
         installment_value = total / len(parts)
         return [

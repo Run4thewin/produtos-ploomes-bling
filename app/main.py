@@ -393,10 +393,28 @@ async def ploomes_deal_webhook(
         return {"status": "processed", "deal_id": parsed["deal_id"], "result": result}
     except RuntimeError as exc:
         logger.exception("Erro operacional ao processar Deal %s via webhook", parsed["deal_id"])
+        _mark_deal_error_best_effort(settings, parsed["deal_id"], str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
+        # Rede de seguranca final: qualquer excecao que os fluxos internos nao
+        # previram (ex: ValueError de um campo do Deal preenchido em formato
+        # inesperado, como "45 DIAS" em vez de "45" -- ver Deal 1107429295)
+        # tinha que ficar so' aqui, virando um 502 que ninguem olha -- o Deal
+        # nao ia pra pendencia, o campo de erro no card ficava vazio, sem
+        # e-mail, sem nenhum sinal visivel do que aconteceu. Agora tenta
+        # marcar o Deal com erro mesmo nesse caso generico.
         logger.exception("Erro ao processar Deal %s via webhook", parsed["deal_id"])
+        _mark_deal_error_best_effort(settings, parsed["deal_id"], str(exc))
         raise HTTPException(status_code=502, detail=f"Erro ao processar Deal: {exc}") from exc
+
+
+def _mark_deal_error_best_effort(settings: Settings, deal_id: str, message: str) -> None:
+    try:
+        DealToBlingOrderSyncService(settings)._mark_deal_error(deal_id, message)
+    except Exception:  # noqa: BLE001 - nunca pode mascarar o erro original
+        logger.exception(
+            "Falha ao marcar Deal %s com erro (rede de seguranca do webhook)", deal_id
+        )
 
 
 @app.post("/tasks/process-bling-product")
