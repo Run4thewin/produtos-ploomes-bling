@@ -494,19 +494,19 @@ class DealToBlingOrderSyncService:
             # A maioria dos Deals que chega aqui nao e faturamento parcial; travar
             # a atualizacao de situacao inteira por falta de quote afetava qualquer
             # Deal, nao so o caso de duplicado/saldo que essa checagem existe pra cobrir.
-            # DESATIVADO 2026-08-17: a comparacao disparava faturamento parcial
-            # (e criava pedido novo no Bling) toda vez que achava QUALQUER
-            # diferenca entre os itens do pedido e a quote mais recente -- mesmo
-            # sem ninguem ter alterado a proposta de proposito (uma quote
-            # revisada por outro motivo, ou o proprio pedido novo do
-            # faturamento parcial anterior, já bastava pra "detectar diferenca"
-            # de novo). Isso causou o Deal 1107214381 triplicar pedido (9055,
-            # 9391, 9392). Faturamento parcial de verdade e' "se precisar fazer
-            # o processo de alterar quantidade na proposta" -- uma acao
-            # deliberada, nao um efeito colateral. Ate definirmos o sinal
-            # correto pra isso (settings.logistics_partial_billing_enabled),
-            # fica sempre desligado: nunca cria pedido novo sozinho aqui, so'
-            # atualiza a situacao do pedido que ja existe.
+            # Religado 2026-08-21 (settings.logistics_partial_billing_enabled).
+            # Tinha sido desligado em 2026-08-17: a comparacao disparava
+            # faturamento parcial toda vez que achava QUALQUER diferenca entre
+            # os itens do pedido e a quote, mesmo sem alteracao deliberada --
+            # isso, somado ao Passo C quebrado (nao reduzia o pedido original,
+            # entao a MESMA diferenca era detectada de novo a cada rodada),
+            # triplicou pedido no Deal 1107214381 (9055, 9391, 9392). As duas
+            # causas ja estao corrigidas: Passo C usa payload completo agora
+            # (ver mais abaixo), e ploomes_deal_partial_billing_order_field
+            # trava contra criar um segundo pedido pro mesmo Deal mesmo que a
+            # comparacao ache diferenca de novo. Fluxo esperado: o vendedor
+            # reduz a quantidade na proposta a mao antes de mover o Deal pra
+            # Logistica, refletindo o que ja foi faturado antes.
             if quote and self.settings.logistics_partial_billing_enabled:
                 original_items = original_order.get("itens") or []
                 deal_items, _deal_total = self._build_items(quote)

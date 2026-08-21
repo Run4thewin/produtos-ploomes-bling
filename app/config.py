@@ -44,12 +44,17 @@ class Settings(BaseSettings):
     # diferenca e criava outro pedido. Pra permitir um novo faturamento
     # parcial legitimo depois, apague o valor deste campo manualmente.
     ploomes_deal_partial_billing_order_field: str = "deal_2F9E1C3F-4AB6-44EF-AFCB-EFDCA8DF0E66"
-    # Desligado 2026-08-17 -- ver comentario em update_situacao_for_logistics_stage.
-    # A deteccao automatica (diferenca de itens entre pedido e quote) disparava
-    # faturamento parcial sem uma alteracao deliberada na proposta, causando
-    # pedido duplicado (Deal 1107214381: 9055, 9391, 9392). So' reativar depois
-    # de definir um sinal explicito de "isto e' faturamento parcial de verdade".
-    logistics_partial_billing_enabled: bool = False
+    # Religado 2026-08-21. Foi desligado em 2026-08-17 porque a deteccao
+    # automatica (diferenca de itens entre pedido e quote) causou pedido
+    # duplicado no Deal 1107214381 (9055, 9391, 9392) -- mas a causa raiz
+    # daquele incidente ja estava corrigida antes do desligamento: o Passo C
+    # quebrado (nao reduzia o pedido original, entao toda rodada nova
+    # comparava contra o pedido inteiro de novo e recriava) e a falta de
+    # trava persistente contra criar um segundo pedido pro mesmo Deal (ver
+    # ploomes_deal_partial_billing_order_field acima, que ja cobre isso).
+    # Fluxo esperado: o vendedor reduz a quantidade na proposta a mao pra
+    # refletir o que ja foi faturado antes de mover o Deal pra Logistica.
+    logistics_partial_billing_enabled: bool = True
     ploomes_deal_purchase_order_field: str = "deal_943CBBDC-AF6A-47DD-8AC0-A6E039BFB82C"
     ploomes_deal_payment_method_field: str = "deal_BFAEEEE4-2B09-4420-87BE-30C7C375C93B"
     ploomes_deal_payment_days_field: str = "deal_429C6DEE-E08F-4D96-844B-CA8FDB433EC8"
